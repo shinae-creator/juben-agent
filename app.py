@@ -7,6 +7,7 @@ v2 澧炲己锛?  - 瀹炴椂杩涘害鏃ュ織闈㈡澘锛堝彸渚э級
 """
 
 import streamlit as st
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -137,49 +138,24 @@ def make_event_handler():
 
 
 # ============================================================================
-# Agent 鑷姩璋冨害閽╁瓙
+# Agent 鑷姩璋冨害閽╁瓙锛坴4锛氫粎鏍囪锛屼笉闃诲 鈥?娴佸紡鍦?UI 鍖烘墽琛岋級
 # ============================================================================
 
-# ---- planning 鈫?璋冪垎娆剧瓥鍒?Agent ----
-if st.session_state.workflow_stage == "planning":
+# ---- planning 鈫?鍑嗗澶х翰娴佸紡鐢熸垚 ----
+if st.session_state.workflow_stage == "planning" and not st.session_state.get("_outline_streaming"):
+    st.session_state._outline_streaming = True
     st.session_state.generation_log = []
     st.session_state.gen_start_time = time.time()
 
-    orch = Orchestrator(on_event=make_event_handler())
-    try:
-        result = orch.generate_outline(st.session_state.topic)
-        st.session_state.outline = result.content
-        st.session_state.total_token_usage["input"] += result.usage.input_tokens
-        st.session_state.total_token_usage["output"] += result.usage.output_tokens
-        st.session_state.gen_elapsed += result.elapsed_seconds
-        st.session_state.workflow_stage = "outline_review"
-        st.session_state.status_message = "澶х翰宸茬敓鎴愶紒璇峰湪宸︿晶瀹℃牳淇敼鍚庣‘璁ゃ€?
-        st.rerun()
-    except Exception as exc:
-        st.session_state.status_message = f"鉂?Agent 璋冪敤澶辫触: {exc}"
-        st.session_state.workflow_stage = "input"
-        st.rerun()
-
-# ---- episode_review 鈫?璋冨垎闆嗘灦鏋勫笀 Agent ----
+# ---- episode_review 鈫?鍑嗗鍒嗛泦娴佸紡鐢熸垚 ----
 if (
     st.session_state.workflow_stage == "episode_review"
     and not st.session_state.episode_list
+    and not st.session_state.get("_episode_streaming")
 ):
-    orch = Orchestrator(on_event=make_event_handler())
-    try:
-        result = orch.generate_episodes(st.session_state.outline)
-        st.session_state.episode_list = result.content
-        st.session_state.total_token_usage["input"] += result.usage.input_tokens
-        st.session_state.total_token_usage["output"] += result.usage.output_tokens
-        st.session_state.gen_elapsed += result.elapsed_seconds
-        st.session_state.status_message = "鐧鹃泦鍗＄偣娓呭崟宸茬敓鎴愶紒璇峰湪宸︿晶瀹℃牳淇敼鍚庣‘璁ゃ€?
-        st.rerun()
-    except Exception as exc:
-        st.session_state.status_message = f"鉂?鍒嗛泦鐢熸垚澶辫触: {exc}"
-        st.session_state.workflow_stage = "outline_review"
-        st.rerun()
+    st.session_state._episode_streaming = True
 
-# ---- generating 鈫?鍚姩娴佸紡鐢熸垚鏍囪 ----
+# ---- generating 鈫?鍑嗗鍓ф湰娴佸紡鐢熸垚 ----
 if (
     st.session_state.workflow_stage == "generating"
     and not st.session_state.script_generating
@@ -187,7 +163,6 @@ if (
     st.session_state.script_generating = True
     st.session_state.script_content = ""
     st.session_state.gen_start_time = time.time()
-    st.rerun()
 
 
 # ============================================================================
@@ -197,6 +172,10 @@ if (
 def reset_workflow():
     for key, default in DEFAULTS.items():
         st.session_state[key] = default
+    # 娓呯悊娴佸紡鏍囪
+    for flag in ["_outline_streaming", "_episode_streaming"]:
+        if flag in st.session_state:
+            del st.session_state[flag]
 
 def get_stage_index(stage: str) -> int:
     order = ["input", "planning", "outline_review", "episode_review", "generating", "done"]
@@ -393,10 +372,95 @@ with right_col:
         else:
             st.caption("鏆傛棤鏃ュ織锛屾彁浜ら鏉愬悗鑷姩鏄剧ず銆?)
 
-    # 鈹€鈹€ 鍓ф湰鐢诲竷 鈹€鈹€
-    st.markdown("### 馃幁 鍓ф湰瀹炴椂棰勮")
+    # 鈹€鈹€ 瀹炴椂娴佸紡鐢熸垚鍖猴紙鍗＄偣1/2/3 鍏辩敤锛夆攢鈹€
+    streaming_active = False
+    stream_title = ""
+    stream_accumulated = ""
 
-    if st.session_state.script_content:
+    # 鍗＄偣涓€锛氬ぇ绾叉祦寮忕敓鎴?    if (st.session_state.get("_outline_streaming")
+            and not st.session_state.outline
+            and st.session_state.workflow_stage == "planning"):
+        streaming_active = True
+        stream_title = "馃 鐖嗘绛栧垝 Agent 姝ｅ湪鏋勬€濆ぇ绾测€?
+        orch = Orchestrator(on_event=make_event_handler())
+        content_ph = st.empty()
+        token_ph = st.empty()
+        accumulated = ""
+        try:
+            for chunk, batch_usage in orch.generate_outline_stream(st.session_state.topic):
+                accumulated += chunk
+                if batch_usage:
+                    st.session_state.total_token_usage["input"] += batch_usage.input_tokens
+                    st.session_state.total_token_usage["output"] += batch_usage.output_tokens
+                elapsed = time.time() - st.session_state.gen_start_time
+                tu = st.session_state.total_token_usage
+                token_ph.caption(
+                    f"鈴?{elapsed:.0f}s | 馃摜 杈撳叆 {tu['input']:,} | 馃摛 杈撳嚭 {tu['output']:,} | 馃敟 鍚堣 {tu['input']+tu['output']:,} tokens"
+                )
+                content_ph.markdown(
+                    f'<div class="script-canvas">{accumulated}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.session_state.outline = accumulated
+            st.session_state._outline_streaming = False
+            st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
+            st.session_state.workflow_stage = "outline_review"
+            st.session_state.status_message = "澶х翰宸茬敓鎴愶紒璇峰湪宸︿晶瀹℃牳淇敼鍚庣‘璁ゃ€?
+            st.rerun()
+        except Exception as exc:
+            st.session_state.status_message = f"鉂?澶х翰鐢熸垚澶辫触: {exc}"
+            st.session_state._outline_streaming = False
+            st.session_state.workflow_stage = "input"
+            st.rerun()
+
+    # 鍗＄偣浜岋細鍒嗛泦娴佸紡鐢熸垚
+    if (st.session_state.get("_episode_streaming")
+            and not st.session_state.episode_list
+            and st.session_state.workflow_stage == "episode_review"):
+        streaming_active = True
+        stream_title = "馃搼 鍒嗛泦鏋舵瀯甯堟鍦ㄥ垏鍒?100 闆嗗崱鐐光€?
+        orch = Orchestrator(on_event=make_event_handler())
+        content_ph = st.empty()
+        token_ph = st.empty()
+        accumulated = ""
+        try:
+            for chunk, batch_usage in orch.generate_episodes_stream(st.session_state.outline):
+                accumulated += chunk
+                if batch_usage:
+                    st.session_state.total_token_usage["input"] += batch_usage.input_tokens
+                    st.session_state.total_token_usage["output"] += batch_usage.output_tokens
+                elapsed = time.time() - st.session_state.gen_start_time
+                tu = st.session_state.total_token_usage
+                token_ph.caption(
+                    f"鈴?{elapsed:.0f}s | 馃摜 杈撳叆 {tu['input']:,} | 馃摛 杈撳嚭 {tu['output']:,} | 馃敟 鍚堣 {tu['input']+tu['output']:,} tokens"
+                )
+                content_ph.markdown(
+                    f'<div class="script-canvas">{accumulated}</div>',
+                    unsafe_allow_html=True,
+                )
+            # 缁熻闆嗘暟
+            ep_count = len(re.findall(r"绗琝s*\d+\s*闆?, accumulated))
+            st.session_state.episode_list = accumulated
+            st.session_state._episode_streaming = False
+            st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
+            st.session_state.status_message = f"鐧鹃泦鍗＄偣娓呭崟宸茬敓鎴愶紙妫€娴嬪埌 {ep_count} 闆嗭級锛佽鍦ㄥ乏渚у鏍镐慨鏀瑰悗纭銆?
+            st.rerun()
+        except Exception as exc:
+            st.session_state.status_message = f"鉂?鍒嗛泦鐢熸垚澶辫触: {exc}"
+            st.session_state._episode_streaming = False
+            st.session_state.workflow_stage = "outline_review"
+            st.rerun()
+
+    # 鈹€鈹€ 娴佸紡鏍囬 鈹€鈹€
+    if streaming_active:
+        st.markdown(f"### {stream_title}")
+    else:
+        st.markdown("### 馃幁 鍓ф湰瀹炴椂棰勮")
+
+    # 鈹€鈹€ 鍗＄偣涓夛細鍓ф湰娴佸紡鐢熸垚 / 闈欐€佸睍绀?鈹€鈹€
+    if streaming_active:
+        pass  # 宸插湪涓婇潰娓叉煋
+    elif st.session_state.script_content:
         st.markdown(
             f'<div class="script-canvas">{st.session_state.script_content}</div>',
             unsafe_allow_html=True,
