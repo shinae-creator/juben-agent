@@ -625,6 +625,62 @@ with st.sidebar:
 
     st.divider()
 
+    # ----- 蹇€熷鍏ワ細璺宠繃 AI 鏋勬€濓紝鐩存帴绮樿创澶х翰/鍒嗛泦 -----
+    with st.expander("馃摜 蹇€熷鍏ワ紙璺宠繃 AI 鏋勬€濓級", expanded=False):
+        st.caption("鐩存帴绮樿创宸叉湁澶х翰鎴栧垎闆嗘竻鍗曪紝璺宠繃 AI 鑷姩鐢熸垚闃舵銆?)
+
+        imported_outline = st.text_area(
+            "绮樿创鐧鹃泦涓荤嚎澶х翰锛?,
+            height=150,
+            placeholder="绮樿创宸叉湁鐨勫ぇ绾叉枃鏈€?,
+            key="import_outline",
+        )
+        if st.button("馃搵 瀵煎叆澶х翰骞惰繘鍏ュ瀹?, use_container_width=True, key="btn_import_outline"):
+            if imported_outline.strip():
+                st.session_state.topic = "锛堝鍏ュぇ绾诧級"
+                st.session_state.topic_submitted = True
+                st.session_state.outline = imported_outline.strip()
+                st.session_state.outline_confirmed = False
+                st.session_state.episode_list = ""  # 娓呯┖鏃у垎闆?                st.session_state.workflow_stage = "outline_review"
+                st.session_state.status_message = "澶х翰宸插鍏ワ紝璇峰鏍镐慨鏀瑰悗纭銆?
+                st.rerun()
+            else:
+                st.warning("璇峰厛绮樿创澶х翰鍐呭銆?)
+
+        imported_episodes = st.text_area(
+            "绮樿创鐧鹃泦鍒嗛泦娓呭崟锛?,
+            height=150,
+            placeholder="绮樿创宸叉湁鐨勫垎闆嗗崱鐐规竻鍗曗€?,
+            key="import_episodes",
+        )
+        col_ie1, col_ie2 = st.columns(2)
+        with col_ie1:
+            if st.button("馃搼 瀵煎叆鍒嗛泦骞跺瀹?, use_container_width=True, key="btn_import_episodes"):
+                if imported_episodes.strip():
+                    st.session_state.episode_list = imported_episodes.strip()
+                    st.session_state.episode_confirmed = False
+                    st.session_state.workflow_stage = "episode_review"
+                    st.session_state.status_message = "鍒嗛泦娓呭崟宸插鍏ワ紝璇峰鏍镐慨鏀瑰悗纭銆?
+                    st.rerun()
+                else:
+                    st.warning("璇峰厛绮樿创鍒嗛泦娓呭崟銆?)
+        with col_ie2:
+            if st.button("馃殌 鐩撮€氱敓鎴?, use_container_width=True, key="btn_import_all"):
+                if imported_outline.strip() and imported_episodes.strip():
+                    st.session_state.topic = "锛堝鍏ュぇ绾诧級"
+                    st.session_state.topic_submitted = True
+                    st.session_state.outline = imported_outline.strip()
+                    st.session_state.outline_confirmed = True
+                    st.session_state.episode_list = imported_episodes.strip()
+                    st.session_state.episode_confirmed = True
+                    st.session_state.workflow_stage = "generating"
+                    st.session_state.status_message = "澶х翰+鍒嗛泦宸插鍏ワ紝鐩存帴寮€濮嬬敓鎴愬墽鏈紒"
+                    st.rerun()
+                else:
+                    st.warning("璇峰悓鏃剁矘璐村ぇ绾插拰鍒嗛泦娓呭崟銆?)
+
+    st.divider()
+
     # ----- 宸ヤ綔娴侀樁娈垫寚绀?-----
     st.markdown("#### 馃幆 褰撳墠闃舵")
     stage_labels = {
