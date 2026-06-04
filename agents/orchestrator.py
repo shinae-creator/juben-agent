@@ -1,16 +1,17 @@
 """
-Agent 矩阵编排器
-================
-负责三阶段流水线调度：
-  1. 爆款策划 Agent → 生成百集主线大纲
-  2. 分集架构师 Agent → 切分 100 集卡点清单
-  3. 对白生成引擎 → 并发/流式输出完整剧本
-
-使用 LiteLLM 作为 LLM 路由层，支持任意模型切换。
+Agent 矩阵编排器 v3
+===================
+v3 修复：
+  - 流式对白逐 token yield，真正打字机效果
+  - Token 用量在每个 yield 中携带，前端可实时累加
+  - 分集 prompt 要求概况+完整100集
 """
 
 import logging
-from typing import Generator, Optional, Callable
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Generator, Optional, Callable, Any
 
 import litellm
 
@@ -28,193 +29,347 @@ from config import (
     EPISODES_PER_BATCH,
 )
 from .prompts import (
-    PLANNER_SYSTEM,
-    PLANNER_USER,
-    EPISODE_SYSTEM,
-    EPISODE_USER,
+    fmt_planner,
+    fmt_episode,
     DIALOGUE_SYSTEM,
     DIALOGUE_USER,
-    DIALOGUE_BATCH_USER,
 )
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# LiteLLM 统一调用封装
+# 数据结构
 # ============================================================================
 
-def _llm_completion(
+@dataclass
+class TokenUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass
+class GenResult:
+    content: str = ""
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    elapsed_seconds: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.usage.total
+
+
+@dataclass
+class ProgressEvent:
+    type: str       # "stage" | "step" | "token" | "done" | "error"
+    message: str
+    data: Any = None
+
+
+# ============================================================================
+# LLM 调用封装
+# ============================================================================
+
+def _llm_call(
     system_prompt: str,
     user_prompt: str,
     temperature: float,
     max_tokens: int,
-    stream: bool = False,
-) -> str | Generator:
+    model: str | None = None,
+    api_key: str | None = None,
+    api_base: str | None = None,
+) -> tuple[str, TokenUsage]:
+    """非流式调用 LLM，返回 (内容, Token用量)。"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    kwargs: dict = {
+        "model": model or LLM_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    key = api_key or LLM_API_KEY
+    base = api_base or LLM_API_BASE
+    if key:   kwargs["api_key"] = key
+    if base:  kwargs["api_base"] = base
+
+    response = litellm.completion(**kwargs)
+    content = response.choices[0].message.content or ""
+    usage = TokenUsage()
+    if hasattr(response, "usage") and response.usage:
+        usage.input_tokens = response.usage.prompt_tokens or 0
+        usage.output_tokens = response.usage.completion_tokens or 0
+    else:
+        usage.output_tokens = max(len(content) // 2, 1)
+        usage.input_tokens = len(system_prompt + user_prompt) // 2
+    return content, usage
+
+
+def _llm_stream(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    model: str | None = None,
+    api_key: str | None = None,
+    api_base: str | None = None,
+) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
     """
-    统一的 LLM 调用入口，封装 LiteLLM completion。
+    流式调用 LLM，逐个 token yield。
 
-    Args:
-        system_prompt: 系统提示词
-        user_prompt:  用户消息
-        temperature:  生成温度
-        max_tokens:   最大输出 token
-        stream:       是否流式返回
-
-    Returns:
-        str 或 Generator（当 stream=True 时）
+    每个 yield: (token_text, usage_or_None)
+    - 中间的 chunk：token_text 是增量文本，usage 为 None
+    - 最后一个 chunk：token_text=""，usage 有值
     """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-
-    kwargs = {
-        "model": LLM_MODEL,
+    kwargs: dict = {
+        "model": model or LLM_MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "stream": stream,
+        "stream": True,
     }
-
-    if LLM_API_KEY:
-        kwargs["api_key"] = LLM_API_KEY
-    if LLM_API_BASE:
-        kwargs["api_base"] = LLM_API_BASE
+    key = api_key or LLM_API_KEY
+    base = api_base or LLM_API_BASE
+    if key:   kwargs["api_key"] = key
+    if base:  kwargs["api_base"] = base
 
     response = litellm.completion(**kwargs)
 
-    if stream:
-        return _stream_generator(response)
+    usage = TokenUsage()
+    accumulated = ""
 
-    return response.choices[0].message.content
-
-
-def _stream_generator(response) -> Generator[str, None, None]:
-    """将 LiteLLM 流式响应转为字符串生成器。"""
     for chunk in response:
         if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+            token = chunk.choices[0].delta.content
+            accumulated += token
+            yield token, None
+
+        # 流式最后一个 chunk 有时携带 usage
+        if hasattr(chunk, "usage") and chunk.usage:
+            u = chunk.usage
+            usage.input_tokens = u.prompt_tokens or 0
+            usage.output_tokens = u.completion_tokens or 0
+
+    # 兜底估算
+    if usage.output_tokens == 0 and accumulated:
+        usage.output_tokens = max(len(accumulated) // 2, 1)
+        usage.input_tokens = len(system_prompt + user_prompt) // 2
+
+    # 结束信号
+    yield "", usage
 
 
 # ============================================================================
-# 编排器
+# 编排器 v3
 # ============================================================================
 
 class Orchestrator:
-    """
-    Agent 矩阵编排器。
-
-    用法：
-        orch = Orchestrator()
-        outline = orch.generate_outline("重生之都市神医")
-        episodes = orch.generate_episodes(outline)
-        for chunk in orch.generate_script_stream("重生之都市神医", episodes):
-            print(chunk, end="")
-    """
 
     def __init__(
         self,
-        model: Optional[str] = None,
-        on_progress: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[ProgressEvent], None]] = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        total_episodes: int = TOTAL_EPISODES,
     ):
-        """
-        Args:
-            model:       覆盖默认模型
-            on_progress: 进度回调，接收状态描述字符串
-        """
-        if model:
-            global LLM_MODEL
-            LLM_MODEL = model
-        self.on_progress = on_progress or (lambda msg: logger.info(msg))
+        self.on_event = on_event or (lambda ev: None)
+        self._cumulative_usage = TokenUsage()
+        self._model = model
+        self._api_key = api_key
+        self._api_base = api_base
+        self._total_episodes = total_episodes
+
+    def _emit(self, etype: str, message: str, data: Any = None):
+        self.on_event(ProgressEvent(type=etype, message=message, data=data))
 
     # ------------------------------------------------------------------
-    # 阶段一：爆款策划 — 生成百集主线大纲
+    # 阶段一：爆款策划
     # ------------------------------------------------------------------
 
-    def generate_outline(self, topic: str) -> str:
-        """
-        输入题材，输出完整的百集主线大纲。
+    def generate_outline(self, topic: str) -> GenResult:
+        self._emit("stage", "🧠 爆款策划 Agent 启动")
+        self._emit("step", f"分析题材「{topic}」…")
+        t0 = time.time()
 
-        Args:
-            topic: 编剧输入的题材/梗概
-
-        Returns:
-            结构化大纲文本
-        """
-        self.on_progress("🧠 爆款策划 Agent 正在构思故事…")
-        outline = _llm_completion(
-            system_prompt=PLANNER_SYSTEM,
-            user_prompt=PLANNER_USER.format(topic=topic),
+        system, user = fmt_planner(self._total_episodes, topic)
+        content, usage = _llm_call(
+            system_prompt=system,
+            user_prompt=user,
             temperature=TEMPERATURE_CREATIVE,
             max_tokens=MAX_TOKENS_OUTLINE,
-            stream=False,
+            model=self._model,
+            api_key=self._api_key,
+            api_base=self._api_base,
         )
-        self.on_progress("✅ 百集主线大纲已生成，等待编剧审定。")
-        return outline
+        self._cumulative_usage.input_tokens += usage.input_tokens
+        self._cumulative_usage.output_tokens += usage.output_tokens
+        elapsed = time.time() - t0
+
+        self._emit("token", f"输入 {usage.input_tokens:,} | 输出 {usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens")
+        self._emit("done", f"大纲生成完毕，耗时 {elapsed:.0f}s")
+        return GenResult(content=content, usage=usage, elapsed_seconds=elapsed)
 
     # ------------------------------------------------------------------
-    # 阶段二：分集架构 — 切分 100 集卡点清单
+    # 阶段二：分集架构
     # ------------------------------------------------------------------
 
-    def generate_episodes(self, outline: str) -> str:
-        """
-        输入大纲，输出完整的 100 集分集卡点清单。
+    def generate_episodes(self, outline: str) -> GenResult:
+        self._emit("stage", "📑 分集架构师 Agent 启动")
+        self._emit("step", "切分 100 集卡点清单…")
+        t0 = time.time()
 
-        如果大纲过长，自动分批调用以绕过 token 限制：
-        每次生成 EPISODES_PER_BATCH 集，最后拼接。
+        total = self._total_episodes
+        groups = total // 10
+        system, user = fmt_episode(total, outline)
+        # 额外强制要求（兜底）
+        extra = (
+            f"\n\n【强制要求】\n"
+            f"1. 开头必须输出一行概况：「本剧共 {total} 集，分为 {groups} 个段落，每 10 集为一个高潮单元。」\n"
+            f"2. 必须完整输出全部 {total} 集，一集都不能少，禁止省略和缩写。\n"
+            f"3. 每集严格按「第 X 集：核心事件 / 冲突点 / 结尾钩子」格式输出。\n"
+            f"4. 第 {total} 集为「★ 高潮集 · 大结局」。\n"
+        )
+        full_user = user + extra
 
-        Args:
-            outline: 已确认的大纲文本
-
-        Returns:
-            100 集分集卡点清单文本
-        """
-        self.on_progress("📑 分集架构师 Agent 正在切分 100 集卡点…")
-
-        # 首次尝试：让 LLM 一次性输出全部（对强模型可行）
         try:
-            episodes = _llm_completion(
-                system_prompt=EPISODE_SYSTEM,
-                user_prompt=EPISODE_USER.format(outline=outline),
+            content, usage = _llm_call(
+                system_prompt=system,
+                user_prompt=full_user,
                 temperature=TEMPERATURE_STRUCTURED,
                 max_tokens=MAX_TOKENS_EPISODES,
-                stream=False,
+                model=self._model,
+                api_key=self._api_key,
+                api_base=self._api_base,
             )
-        except Exception as e:
-            logger.warning("一次性生成百集失败（可能是 token 限制），回退分批模式: %s", e)
-            episodes = self._generate_episodes_batched(outline)
+        except Exception:
+            logger.warning("一次性生成百集失败，回退分批模式")
+            content, usage = self._generate_episodes_batched(outline)
 
-        self.on_progress("✅ 百集分集卡点清单已生成，等待编剧审定。")
-        return episodes
+        self._cumulative_usage.input_tokens += usage.input_tokens
+        self._cumulative_usage.output_tokens += usage.output_tokens
+        elapsed = time.time() - t0
 
-    def _generate_episodes_batched(self, outline: str) -> str:
-        """分批生成分集卡点（兜底方案）。"""
+        # 统计实际生成集数
+        ep_count = len(re.findall(r"第\s*\d+\s*集", content))
+        self._emit("token", f"输入 {usage.input_tokens:,} | 输出 {usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens | 检测到 {ep_count} 集")
+        self._emit("done", f"分集清单生成完毕，共 {ep_count} 集，耗时 {elapsed:.0f}s")
+        return GenResult(content=content, usage=usage, elapsed_seconds=elapsed)
+
+    def _generate_episodes_batched(self, outline: str) -> tuple[str, TokenUsage]:
         batches = []
-        batch_count = TOTAL_EPISODES // EPISODES_PER_BATCH
+        total_usage = TokenUsage()
+        total = self._total_episodes
+        batch_count = max(total // EPISODES_PER_BATCH, 1)
+        system, base_user = fmt_episode(total, outline)
 
         for i in range(batch_count):
             start = i * EPISODES_PER_BATCH + 1
-            end = (i + 1) * EPISODES_PER_BATCH
-            self.on_progress(f"  📑 正在生成第 {start}~{end} 集卡点…")
+            end = min((i + 1) * EPISODES_PER_BATCH, total)
+            self._emit("step", f"分批：第 {start}~{end} 集 ({i+1}/{batch_count})")
 
-            prompt = (
-                EPISODE_USER.format(outline=outline)
-                + f"\n\n【特别指令】请只输出第 {start} 集到第 {end} 集的分集卡点。"
+            extra = (
+                f"\n\n【强制要求】只输出第 {start}~{end} 集，"
+                f"每集按「第 X 集：核心事件 / 冲突点 / 结尾钩子」格式。禁止省略。"
             )
-            batch_text = _llm_completion(
-                system_prompt=EPISODE_SYSTEM,
+            prompt = base_user + extra
+            text, usage = _llm_call(
+                system_prompt=system,
                 user_prompt=prompt,
                 temperature=TEMPERATURE_STRUCTURED,
-                max_tokens=MAX_TOKENS_EPISODES,
-                stream=False,
+                max_tokens=MAX_TOKENS_EPISODES // 2,
+                model=self._model,
+                api_key=self._api_key,
+                api_base=self._api_base,
             )
-            batches.append(batch_text)
+            batches.append(text)
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
 
-        return "\n\n".join(batches)
+        return "\n\n".join(batches), total_usage
 
     # ------------------------------------------------------------------
-    # 阶段三：对白生成 — 流式输出剧本
+    # 阶段一（流式版）：逐 token yield，前端实时展示
+    # ------------------------------------------------------------------
+
+    def generate_outline_stream(
+        self, topic: str
+    ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
+        """流式生成大纲，逐 token yield。前端可实时看到大纲逐字出现。"""
+        self._emit("stage", "🧠 爆款策划 Agent 启动（流式）")
+        self._emit("step", f"分析题材「{topic}」…")
+
+        system, user = fmt_planner(self._total_episodes, topic)
+        for token, final_usage in _llm_stream(
+            system_prompt=system,
+            user_prompt=user,
+            temperature=TEMPERATURE_CREATIVE,
+            max_tokens=MAX_TOKENS_OUTLINE,
+            model=self._model,
+            api_key=self._api_key,
+            api_base=self._api_base,
+        ):  # ← outline streaming
+            if token:
+                yield token, None
+            if final_usage is not None:
+                self._cumulative_usage.input_tokens += final_usage.input_tokens
+                self._cumulative_usage.output_tokens += final_usage.output_tokens
+                self._emit("token", f"输入 {final_usage.input_tokens:,} | 输出 {final_usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens")
+                self._emit("done", "大纲流式生成完毕")
+                yield "", final_usage
+
+    # ------------------------------------------------------------------
+    # 阶段二（流式版）：逐 token yield
+    # ------------------------------------------------------------------
+
+    def generate_episodes_stream(
+        self, outline: str
+    ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
+        """流式生成分集清单，逐 token yield。"""
+        total = self._total_episodes
+        self._emit("stage", "📑 分集架构师 Agent 启动（流式）")
+        self._emit("step", f"切分 {total} 集卡点清单…")
+
+        system, user = fmt_episode(total, outline)
+        # 额外强制要求（兜底）
+        extra = (
+            f"\n\n【再次强调】必须完整输出全部 {total} 集。"
+            f"一集都不能少。第 {total} 集为大结局高潮集。"
+        )
+        full_user = user + extra
+
+        for token, final_usage in _llm_stream(
+            system_prompt=system,
+            user_prompt=full_user,
+            temperature=TEMPERATURE_STRUCTURED,
+            max_tokens=MAX_TOKENS_EPISODES,
+            model=self._model,
+            api_key=self._api_key,
+            api_base=self._api_base,
+        ):
+            if token:
+                yield token, None
+            if final_usage is not None:
+                self._cumulative_usage.input_tokens += final_usage.input_tokens
+                self._cumulative_usage.output_tokens += final_usage.output_tokens
+                ep_count = 0  # 流式场景下粗略估计
+                self._emit("token", f"输入 {final_usage.input_tokens:,} | 输出 {final_usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens")
+                self._emit("done", "分集清单流式生成完毕")
+                yield "", final_usage
+
+    # ------------------------------------------------------------------
+    # 阶段三：对白生成 — 逐 token 流式 yield（打字机效果）
     # ------------------------------------------------------------------
 
     def generate_script_stream(
@@ -223,113 +378,92 @@ class Orchestrator:
         episode_list: str,
         start_ep: int = 1,
         end_ep: Optional[int] = None,
-    ) -> Generator[str, None, None]:
+    ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
         """
-        流式生成完整剧本对白。
+        流式生成剧本对白，逐 token yield。
 
-        按批次生成：每个 yield 返回一批对白文本，
-        Streamlit 端累积展示，形成打字机效果。
-
-        Args:
-            topic:         剧名/题材
-            episode_list:  已确认的分集卡点清单
-            start_ep:      起始集数（默认 1）
-            end_ep:        结束集数（默认 100）
-
-        Yields:
-            每批对白文本块
+        每个 yield 返回 (文本增量, TokenUsage或None)。
+        - 文本增量：单个或少量 token 字符
+        - TokenUsage 非 None 时表示该批次的 token 统计（用于前端累加）
         """
         if end_ep is None:
-            end_ep = TOTAL_EPISODES
+            end_ep = self._total_episodes
 
-        # 解析分集卡点清单，按「第 X 集」分割
         episode_chunks = self._parse_episode_blocks(episode_list, start_ep, end_ep)
 
-        self.on_progress(f"✍️ 对白引擎启动，即将生成 {start_ep}~{end_ep} 集剧本…")
+        total_batches = max((len(episode_chunks) + EPISODES_PER_BATCH - 1) // EPISODES_PER_BATCH, 1)
+        self._emit("stage", "✍️ 对白生成引擎启动")
+        self._emit("step", f"共 {len(episode_chunks)} 集卡点，分 {total_batches} 批，逐字流式输出…")
 
-        # 分批生成（每批 EPISODES_PER_BATCH 集）
         for batch_idx in range(0, len(episode_chunks), EPISODES_PER_BATCH):
             batch = episode_chunks[batch_idx:batch_idx + EPISODES_PER_BATCH]
             batch_text = "\n\n---\n\n".join(batch)
 
             ep_start = start_ep + batch_idx
-            ep_end = min(ep_start + EPISODES_PER_BATCH - 1, end_ep)
+            ep_end = min(ep_start + len(batch) - 1, end_ep)
+            batch_num = batch_idx // EPISODES_PER_BATCH + 1
 
-            self.on_progress(f"  ✍️ 正在生成第 {ep_start}~{ep_end} 集对白…")
+            self._emit("step", f"第 {ep_start}~{ep_end} 集对白 ({batch_num}/{total_batches})")
 
-            # 流式调用 LLM 输出本批对白
             user_prompt = DIALOGUE_USER.format(
                 topic=topic,
                 episode_context=batch_text,
             )
 
-            stream = _llm_completion(
+            # 先 yield 标题行
+            header = f"\n\n## 第 {ep_start}~{ep_end} 集\n\n"
+            for ch in header:
+                yield ch, None
+
+            # 逐 token 流式 yield
+            for token_text, final_usage in _llm_stream(
                 system_prompt=DIALOGUE_SYSTEM,
                 user_prompt=user_prompt,
                 temperature=TEMPERATURE_SCRIPT,
                 max_tokens=MAX_TOKENS_SCRIPT,
-                stream=True,
-            )
+                model=self._model,
+                api_key=self._api_key,
+                api_base=self._api_base,
+            ):
+                if token_text:
+                    yield token_text, None
+                if final_usage is not None:
+                    self._cumulative_usage.input_tokens += final_usage.input_tokens
+                    self._cumulative_usage.output_tokens += final_usage.output_tokens
+                    self._emit("token", f"第 {ep_start}~{ep_end} 集完成 — 输出 {final_usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens")
+                    yield "", final_usage
 
-            # 逐 token yield
-            chunk_prefix = f"\n\n## 第 {ep_start}~{ep_end} 集\n\n"
-            yield chunk_prefix
-
-            for token in stream:
-                yield token
-
-        self.on_progress("✅ 剧本对白全部生成完毕！")
+        self._emit("done", "全部对白生成完毕！")
 
     # ------------------------------------------------------------------
-    # 辅助：解析分集卡点为独立块
+    # 属性 & 辅助
     # ------------------------------------------------------------------
+
+    @property
+    def cumulative_usage(self) -> TokenUsage:
+        return self._cumulative_usage
 
     @staticmethod
-    def _parse_episode_blocks(
-        episode_text: str, start_ep: int, end_ep: int
-    ) -> list[str]:
-        """
-        从分集清单文本中提取指定范围的集数块。
-
-        匹配模式：第 X 集 / 第X集 / Episode X 等。
-        """
-        import re
-
-        # 按「第 X 集」分割
+    def _parse_episode_blocks(episode_text: str, start_ep: int, end_ep: int) -> list[str]:
         pattern = r"(第\s*\d+\s*集[\s\S]*?)(?=第\s*\d+\s*集|$)"
-        matches = list(re.finditer(pattern, episode_text))
-
         blocks = []
-        for m in matches:
-            # 提取集号
+        for m in re.finditer(pattern, episode_text):
             ep_match = re.search(r"第\s*(\d+)\s*集", m.group(1))
             if ep_match:
                 ep_num = int(ep_match.group(1))
                 if start_ep <= ep_num <= end_ep:
                     blocks.append(m.group(1).strip())
-
         return blocks
 
 
-# ============================================================================
-# 健康检查
-# ============================================================================
-
 def check_llm_connection() -> tuple[bool, str]:
-    """
-    快速检测 LLM 连接是否正常。
-
-    Returns:
-        (是否可用, 消息)
-    """
     try:
-        _llm_completion(
+        content, usage = _llm_call(
             system_prompt="你是一个助手。",
-            user_prompt="回复'OK'。",
+            user_prompt="回复 OK。",
             temperature=0,
             max_tokens=10,
-            stream=False,
         )
-        return True, f"✅ LLM 连接正常 ({LLM_MODEL})"
+        return True, f"LLM 连接正常 ({LLM_MODEL}), latency tokens={usage.total}"
     except Exception as e:
-        return False, f"❌ LLM 连接失败: {str(e)[:200]}"
+        return False, f"LLM 连接失败: {str(e)[:200]}"

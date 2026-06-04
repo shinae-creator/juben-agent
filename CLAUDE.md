@@ -1,0 +1,94 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 项目概述
+
+短剧 Agent 创作工作站 — 基于 Streamlit 的纯 Web 端短剧剧本 AI 生成工具。编剧无需接触终端，在网页上完成：输入题材 → AI 构思大纲 → 审核确认 → AI 拆分 N 集卡点 → 审核确认 → 流式生成剧本对白 → 一键下载。
+
+## 常用命令
+
+```powershell
+# 启动（Windows，必须用 py -m，不能用 bash 的 streamlit 命令）
+cd L:\vscod\juben-agent
+py -m streamlit run app.py --server.headless true --server.port 8501
+
+# 重启前务必清除 Python 字节码缓存，否则修改不生效
+taskkill /F /IM streamlit.exe 2>$null; taskkill /F /IM python.exe 2>$null
+Remove-Item -Recurse -Force "L:\vscod\juben-agent\__pycache__" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "L:\vscod\juben-agent\agents\__pycache__" -ErrorAction SilentlyContinue
+
+# 验证 prompt / LLM 连接
+py -c "from agents.prompts import fmt_episode; s, u = fmt_episode(20, 'test'); print('20 instances:', s.count('20 集'))"
+py -c "from agents.orchestrator import check_llm_connection; ok, msg = check_llm_connection(); print(msg)"
+```
+
+## 架构
+
+```
+app.py                     # Streamlit 前端（~750行），UI + session_state + 流式渲染
+├── config.py              # LLM 参数 + .env 加载（python-dotenv）
+├── llm_config.py          # 多模型配置管理，JSON 持久化到 .claude/llm_configs.json
+├── history.py             # 生成记录，保存到 generations/<ts>_<slug>/
+└── agents/
+    ├── __init__.py         # 导出 Orchestrator
+    ├── orchestrator.py     # Agent 矩阵编排器：三阶段流水线 + 流式/非流式 LLM 调用
+    ├── prompts.py          # 三大 Agent 系统提示词 + fmt_planner()/fmt_episode() 动态格式化
+    └── mock.py             # 测试模式 Mock 数据，不烧 Token
+```
+
+### 数据流
+
+```
+用户输入题材 → st.session_state.topic
+  → Orchestrator.generate_outline_stream()  → outline → outline_editor_v{N}  widget
+  → Orchestrator.generate_episodes_stream() → episode_list → episode_editor_v{N} widget
+  → Orchestrator.generate_script_stream() → script_content → 下载 / 保存
+```
+
+### 状态机
+
+`st.session_state.workflow_stage`: `input` → `planning` → `outline_review` → `episode_review` → `generating` → `done`
+
+### 流式架构关键点
+
+- 每个阶段有钩子（hook）设置标记位（如 `_outline_streaming`），不阻塞渲染
+- 实际流式生成在右侧面板的 if-block 中执行，逐 token 更新 `st.empty()` placeholder
+- `st.rerun()` 在流式完成后触发，将内容从右侧画布转移至左侧卡点卡片
+- 每个阶段独立的 `gen_start_time` 计时
+
+## 关键实现细节
+
+### Widget 状态版本化（v5 修复的核心 bug）
+
+Streamlit 的 `st.text_area(value=..., key=...)` 有一个陷阱：widget 一旦渲染，后续 rerun 中 `value=` 参数被忽略，以 key 对应的内部状态为准。如果流式生成前 text_area 先渲染了空内容，流式完成后 `value=` 传入新内容也会被旧空状态覆盖。
+
+**解决方案**：用版本号生成新 key。每次 AI 生成/导入新内容时 `_bump_outline_version()` / `_bump_episode_version()` 递增版本号 → `key=f"outline_editor_v{version}"` 是全新 key → Streamlit 把 `value=` 当作初始值。
+
+此模式也适用于 selectbox、number_input 等其他 widget。
+
+### Streamlit 铁律
+
+- 不能在 widget 渲染后手动写 `st.session_state[widget_key] = value`，会报 `cannot be modified after the widget is instantiated`
+- `py -m streamlit` 启动（不是 `streamlit` 直接命令），因为 Windows 环境 PATH 不一致
+- 修改 `.py` 文件后必须清理 `__pycache__` 再重启，否则 Python 加载旧字节码
+
+### LLM 配置
+
+- `.env` 文件持久化 API key，`config.py` 和 `llm_config.py` 启动时通过 `python-dotenv` 自动加载
+- `.env` 已在 `.gitignore` 中，不会提交
+- 前端 `🔌 LLM 模型配置` 面板可新增/切换/删除模型，保存到 `.claude/llm_configs.json`
+- `Orchestrator.__init__` 接受 `model/api_key/api_base/total_episodes` 参数，覆盖 `config.py` 默认值
+- `_llm_call()` 和 `_llm_stream()` 的签名是 `(system_prompt, user_prompt, temperature, max_tokens, model=None, api_key=None, api_base=None)` — 最后三个参数可选，传 None 时使用模块级默认值
+
+### Prompt 动态集数
+
+所有 prompt 均使用 `{total_episodes}` / `{groups}` 占位符，由 `fmt_planner(total_episodes, topic)` / `fmt_episode(total_episodes, outline)` 运行时填充。`groups = total_episodes // 10`。
+
+### 测试模式
+
+侧边栏 `🧪 测试模式` 复选框开启后，所有 LLM 调用替换为 `agents/mock.py` 的本地假数据，秒级完成，零 API 费用。Mock 函数签名与 Orchestrator 流式方法一致，接受 `total_episodes` 参数动态生成对应集数。
+
+### .gitignore
+
+排除 `__pycache__/`、`.claude/`、`*.pyc`、`test_*.py`、`.env`。
