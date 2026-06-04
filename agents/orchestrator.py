@@ -259,6 +259,65 @@ class Orchestrator:
         return "\n\n".join(batches), total_usage
 
     # ------------------------------------------------------------------
+    # 闃舵涓€锛堟祦寮忕増锛夛細閫?token yield锛屽墠绔疄鏃跺睍绀?    # ------------------------------------------------------------------
+
+    def generate_outline_stream(
+        self, topic: str
+    ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
+        """娴佸紡鐢熸垚澶х翰锛岄€?token yield銆傚墠绔彲瀹炴椂鐪嬪埌澶х翰閫愬瓧鍑虹幇銆?""
+        self._emit("stage", "馃 鐖嗘绛栧垝 Agent 鍚姩锛堟祦寮忥級")
+        self._emit("step", f"鍒嗘瀽棰樻潗銆寋topic}銆嶁€?)
+
+        for token, final_usage in _llm_stream(
+            system_prompt=PLANNER_SYSTEM,
+            user_prompt=PLANNER_USER.format(topic=topic),
+            temperature=TEMPERATURE_CREATIVE,
+            max_tokens=MAX_TOKENS_OUTLINE,
+        ):
+            if token:
+                yield token, None
+            if final_usage is not None:
+                self._cumulative_usage.input_tokens += final_usage.input_tokens
+                self._cumulative_usage.output_tokens += final_usage.output_tokens
+                self._emit("token", f"杈撳叆 {final_usage.input_tokens:,} | 杈撳嚭 {final_usage.output_tokens:,} | 绱 {self._cumulative_usage.total:,} tokens")
+                self._emit("done", "澶х翰娴佸紡鐢熸垚瀹屾瘯")
+                yield "", final_usage
+
+    # ------------------------------------------------------------------
+    # 闃舵浜岋紙娴佸紡鐗堬級锛氶€?token yield
+    # ------------------------------------------------------------------
+
+    def generate_episodes_stream(
+        self, outline: str
+    ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
+        """娴佸紡鐢熸垚鍒嗛泦娓呭崟锛岄€?token yield銆?""
+        self._emit("stage", "馃搼 鍒嗛泦鏋舵瀯甯?Agent 鍚姩锛堟祦寮忥級")
+        self._emit("step", "鍒囧垎 100 闆嗗崱鐐规竻鍗曗€?)
+
+        extra = (
+            f"\n\n銆愬己鍒惰姹傘€慭n"
+            f"1. 寮€澶村繀椤昏緭鍑轰竴琛屾鍐碉細銆屾湰鍓у叡 100 闆嗭紝鍒嗕负 10 涓钀斤紝姣?10 闆嗕负涓€涓珮娼崟鍏冦€傘€峔n"
+            f"2. 蹇呴』瀹屾暣杈撳嚭鍏ㄩ儴 {TOTAL_EPISODES} 闆嗭紝涓€闆嗛兘涓嶈兘灏戯紝绂佹鐪佺暐鍜岀缉鍐欍€俓n"
+            f"3. 姣忛泦涓ユ牸鎸夈€岀 X 闆嗭細鏍稿績浜嬩欢 / 鍐茬獊鐐?/ 缁撳熬閽╁瓙銆嶆牸寮忚緭鍑恒€俓n"
+        )
+        full_user = EPISODE_USER.format(outline=outline) + extra
+
+        for token, final_usage in _llm_stream(
+            system_prompt=EPISODE_SYSTEM,
+            user_prompt=full_user,
+            temperature=TEMPERATURE_STRUCTURED,
+            max_tokens=MAX_TOKENS_EPISODES,
+        ):
+            if token:
+                yield token, None
+            if final_usage is not None:
+                self._cumulative_usage.input_tokens += final_usage.input_tokens
+                self._cumulative_usage.output_tokens += final_usage.output_tokens
+                ep_count = 0  # 娴佸紡鍦烘櫙涓嬬矖鐣ヤ及璁?                self._emit("token", f"杈撳叆 {final_usage.input_tokens:,} | 杈撳嚭 {final_usage.output_tokens:,} | 绱 {self._cumulative_usage.total:,} tokens")
+                self._emit("done", "鍒嗛泦娓呭崟娴佸紡鐢熸垚瀹屾瘯")
+                yield "", final_usage
+
+    # ------------------------------------------------------------------
     # 闃舵涓夛細瀵圭櫧鐢熸垚 鈥?閫?token 娴佸紡 yield锛堟墦瀛楁満鏁堟灉锛?    # ------------------------------------------------------------------
 
     def generate_script_stream(
