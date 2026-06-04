@@ -252,14 +252,19 @@ with left_col:
     if st.session_state.status_message:
         st.info(st.session_state.status_message)
 
-    # 鈹€鈹€ Token 鐢ㄩ噺鏉?鈹€鈹€
+    # 鈹€鈹€ Token 鐢ㄩ噺闈㈡澘锛圕laude Code 椋庢牸鍔ㄦ€佺疮鍔狅級 鈹€鈹€
     tu = st.session_state.total_token_usage
     if tu["input"] > 0 or tu["output"] > 0:
-        total = tu["input"] + tu["output"]
-        st.caption(
-            f"馃搳 Token 鐢ㄩ噺 鈥?杈撳叆: {tu['input']:,} | "
-            f"杈撳嚭: {tu['output']:,} | 鍚堣: {total:,} | "
-            f"鑰楁椂: {st.session_state.gen_elapsed:.0f}s"
+        total_t = tu["input"] + tu["output"]
+        elapsed = st.session_state.gen_elapsed or (time.time() - st.session_state.gen_start_time if st.session_state.gen_start_time else 0)
+        st.markdown(
+            f"""<div style="background:#f0f4ff;border:1px solid #c8d6ff;border-radius:8px;padding:0.6rem 1rem;margin-bottom:0.8rem;font-family:Consolas,monospace;font-size:0.82rem;">
+            馃摜 杈撳叆 <b>{tu['input']:,}</b> &nbsp;|&nbsp;
+            馃摛 杈撳嚭 <b>{tu['output']:,}</b> &nbsp;|&nbsp;
+            馃敟 鍚堣 <b style="color:#667eea;">{total_t:,}</b> tokens &nbsp;|&nbsp;
+            鈴?<b>{elapsed:.0f}s</b>
+            </div>""",
+            unsafe_allow_html=True,
         )
 
     # ============================
@@ -397,9 +402,10 @@ with right_col:
             unsafe_allow_html=True,
         )
     elif st.session_state.workflow_stage == "generating" and st.session_state.script_generating:
-        # ---- 娴佸紡鐢熸垚 ----
+        # ---- 娴佸紡鐢熸垚锛堥€?token 鎵撳瓧鏈猴級 ----
         orch = Orchestrator(on_event=make_event_handler())
         script_placeholder = st.empty()
+        token_placeholder = st.empty()
         accumulated = ""
 
         try:
@@ -412,17 +418,26 @@ with right_col:
                 if batch_usage:
                     st.session_state.total_token_usage["input"] += batch_usage.input_tokens
                     st.session_state.total_token_usage["output"] += batch_usage.output_tokens
-                script_placeholder.markdown(
+
+                # 瀹炴椂 Token 鍔ㄦ€佺疮鍔犳樉绀猴紙绫?Claude Code 鏁堟灉锛?                elapsed = time.time() - st.session_state.gen_start_time
+                tu = st.session_state.total_token_usage
+                token_placeholder.caption(
+                    f"鈴?{elapsed:.0f}s | "
+                    f"馃摜 杈撳叆 {tu['input']:,} | 馃摛 杈撳嚭 {tu['output']:,} | "
+                    f"馃敟 鍚堣 {tu['input'] + tu['output']:,} tokens"
+                )
+                # 鎵撳瓧鏈虹敾甯?                script_placeholder.markdown(
                     f'<div class="script-canvas">{accumulated}</div>',
                     unsafe_allow_html=True,
                 )
+
             st.session_state.script_content = accumulated
             st.session_state.script_generating = False
             st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
             st.session_state.workflow_stage = "done"
             st.session_state.status_message = "鉁?鍓ф湰鐢熸垚瀹屾瘯锛佸彲涓嬭浇鎴栧洖鐪嬨€?
 
-            # ---- 鑷姩淇濆瓨鍒?generations/ ----
+            # ---- 鑷姩淇濆瓨 ----
             try:
                 from config import LLM_MODEL
                 save_generation(
