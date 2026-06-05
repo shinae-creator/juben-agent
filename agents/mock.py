@@ -3,12 +3,16 @@ Mock LLM 测试模式
 ================
 不调用真实 API，用假数据快速调试验证 UI 流程。
 侧边栏开关控制，默认关闭。
+
+v2: 支持结构化 EpisodeCard + 4 维评分曲线。
 """
 
+import json
 import time
 import random
 from typing import Generator, Optional
 from .orchestrator import TokenUsage
+from .schemas import EpisodeCard
 
 # 模拟延迟（秒），模拟真实 API 的 token 生成速度
 MOCK_TOKEN_DELAY = 0.015  # ~65 tokens/秒，模拟真实流式速度
@@ -236,41 +240,79 @@ MOCK_EPISODES = """【本剧共 100 集 | 分 10 个段落单元 | 每 10 集为
 
 MOCK_SCRIPT_SAMPLES = [
     """
-【第 1 集】归来的私生女
+第 1 集：归来的私生女
 
-[场景：京城国际机场 · 傍晚]
+【镜1】全景 · 摇
+📍 京城国际机场 · 傍晚 · 冷金色调
+📷 夕阳斜照到达大厅，脚下是匆匆而过的旅客。镜头从熙攘人群中缓缓摇过，停在一个纤细的身影上——苏念薇拖着行李箱站在出口，逆光中剪影分明。
+🎙️ 机场广播声渐渐模糊
 
-苏念薇：（拖着行李箱走出到达口，抬头看天）三年了……京城，我回来了。
-苏家司机老陈：（举着「苏念薇」的牌子，漫不经心）你就是苏念薇？车在外面，自己走过去吧。
-苏念薇：（平静注视）好。
+苏念薇（内心独白）：三年了……京城，我回来了。
 
-[场景：机场外停车场 · 傍晚]
+【镜2】中景 · 跟拍
+📷 苏念薇迈步走向停车场，风吹起她的长发。镜头跟随她的背影，路过行色匆匆的旅人。
 
-老陈：（坐在驾驶座，车窗半开）不好意思啊，大小姐临时要用车，你自己打车吧。（发动汽车扬长而去）
-苏念薇：（看着远去的车，嘴角微扬）还是老把戏……
+苏家司机老陈：（靠在车门上，头也不抬）你就是苏念薇？车被大小姐调走了，自己想办法吧。
 
-（手机突然震动）
+【镜3】近景
+📷 苏念薇面无表情地看着老陈上车离去，嘴角缓缓勾起一丝若有若无的弧度。
 
-陌生号码短信：「离开京城，否则后果自负。」
-苏念薇：（删除短信，眼神渐冷）该怕的人，不是我。
+苏念薇（低声）：还是这些老把戏。
 
-[转场：苏家豪宅 · 夜]
+【镜4】特写
+📷 手机屏幕突然亮起，一条未读短信赫然显示：「离开京城，否则后果自负。」苏念薇的拇指悬在屏幕上方，停顿了一秒。
+
+【镜5】大特写 · 慢推
+📷 苏念薇的眼神从平静渐变为冰冷，瞳孔中映着手机屏幕的光。她轻触删除键，短信消失。
+
+苏念薇（冷声）：该怕的人，不是我。
+
+【镜6】远景 · 升
+📍 机场外 · 华灯初上
+📷 镜头缓缓升起，俯瞰京城夜景。苏念薇打车远去，红色尾灯在夜色中拉出一道流光。
+🎙️ 配乐：低沉弦乐渐起
+
+[黑场 · 字幕：第一集 完]
 """,
 ]
 
-# 批量生成更多 mock 对白
+# 批量生成更多 mock 分镜头剧本
 for i in range(2, 11):
     MOCK_SCRIPT_SAMPLES.append(f"""
-【第 {i} 集】连载中
+第 {i} 集：暗流涌动
 
-[场景：苏家 · 夜]
+【镜1】中景 · 跟拍
+📍 苏家豪宅大门 · 夜 · 暖金色灯光
+📷 苏念薇推开沉重的铜门，走入灯火辉煌的前厅。镜头跟随她的背影推进，地毯上投下长长的影子。
+🎙️ 宴会喧哗声渐起
 
-苏念薇：（推门而入）我来晚了。
-苏若兰：（冷笑）你还真有脸来？
-顾景琛：（从阴影中走出）她是我请来的客人。谁有意见？
-苏若兰：（脸色一变）顾……顾少……
+【镜2】全景
+📷 大厅内宾客云集，觥筹交错间所有人的目光齐刷刷投向门口。苏念薇站在门口，宛如孤岛。
 
-[转场]
+苏若兰：（摇曳酒杯，冷笑）还真有脸来啊，私生女。
+
+【镜3】近景 · 推
+📷 苏念薇抬头迎上苏若兰的目光，眼神平静如水。镜头缓缓推向她的脸，人群中窃窃私语的声音渐渐退去。
+
+苏念薇：你以为三年前的戏码，还能演到我身上？
+
+【镜4】特写
+📷 苏若兰手中的酒杯被捏得指节发白，红酒微微晃动。
+
+【镜5】中景
+📷 一道修长的身影从阴影中走出。顾景琛的出现让大厅瞬间安静。
+
+顾景琛：（目光扫过全场）她是我请来的客人。谁有意见？
+
+【镜6】近景 · 手持微晃
+📷 苏若兰的脸色刷白，嘴唇微启却说不出话。镜头微晃，仿佛她内心的震动。
+
+苏若兰：顾……顾少……
+
+【镜7】近景 · 慢推
+📷 苏念薇看向顾景琛，两人目光在空中交汇。一丝不易察觉的笑意从她眼中掠过。
+
+[黑场 · 集末钩子：顾景琛为何出手相助？]
 """)
 
 
@@ -341,8 +383,14 @@ def _build_mock_episodes(total: int) -> str:
 
 
 def generate_mock_episodes_stream(outline: str, total_episodes: int = 100) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
-    """Mock 分集流式生成"""
-    text = _build_mock_episodes(total_episodes)
+    """Mock 分集流式生成（V2: 输出 JSON 数组，含 4 维评分）。"""
+    cards = _build_mock_episode_cards(total_episodes)
+    # 序列化为 JSON 字符串（streamlit 兼容：ensure_ascii=False 保留中文）
+    text = json.dumps(
+        [c.model_dump() for c in cards],
+        ensure_ascii=False,
+        indent=2,
+    )
     for i, char in enumerate(text):
         time.sleep(MOCK_TOKEN_DELAY * (0.3 + random.random() * 0.7))
         yield char, None
@@ -353,68 +401,216 @@ def generate_mock_episodes_stream(outline: str, total_episodes: int = 100) -> Ge
     yield "", usage
 
 
+def _build_mock_episode_cards(total: int) -> list[EpisodeCard]:
+    """按叙事弧线生成结构化 EpisodeCard，评分曲线自然波动。
+
+    评分曲线设计：
+      - 第 1 集：hook 9，conflict 7，pleasure 5，emotion 4（开局强钩子）
+      - 每 10 集高潮：四维 8-10
+      - 大结局：四维 9-10
+      - 中间过渡：4-7 区间波动
+    """
+    # ── 叙事弧线参数 ──
+    def _arc_scores(ep: int, total: int) -> dict:
+        pos = ep / total  # 0.0 ~ 1.0
+        is_climax = (ep % 10 == 0) or (ep == total)
+
+        if ep == 1:
+            # 最强开局：高冲突 + 极高钩子
+            return {"conflict": 7, "pleasure": 5, "hook": 9, "emotion": 4}
+        elif is_climax and ep == total:
+            # 大结局：全面爆发
+            return {"conflict": 10, "pleasure": 10, "hook": 10, "emotion": 10}
+        elif is_climax:
+            # 段落高潮集
+            return {"conflict": 9, "pleasure": 9, "hook": 9, "emotion": 8}
+        elif pos < 0.25:
+            # 展开段：建立冲突
+            return {
+                "conflict": 5 + (ep % 3),
+                "pleasure": 4 + (ep % 3),
+                "hook": 6 + (ep % 3),
+                "emotion": 4 + (ep % 2),
+            }
+        elif pos < 0.5:
+            # 过渡段：有起有伏
+            return {
+                "conflict": 4 + (ep % 4),
+                "pleasure": 3 + (ep % 4),
+                "hook": 5 + (ep % 3),
+                "emotion": 5 + (ep % 3),
+            }
+        elif pos < 0.75:
+            # 反击段：逐步升温
+            return {
+                "conflict": 6 + (ep % 3),
+                "pleasure": 6 + (ep % 3),
+                "hook": 6 + (ep % 3),
+                "emotion": 5 + (ep % 3),
+            }
+        else:
+            # 终局段：全面升级
+            return {
+                "conflict": 7 + (ep % 3),
+                "pleasure": 7 + (ep % 3),
+                "hook": 7 + (ep % 3),
+                "emotion": 7 + (ep % 2),
+            }
+
+    # ── Mock 标题库 ──
+    mock_titles = [
+        "归来", "豪门夜宴", "一针惊四座", "暗流涌动", "初露锋芒",
+        "步步紧逼", "绝地反击", "真相碎片", "身世之谜", "高潮对决",
+        "重整旗鼓", "暗度陈仓", "棋逢对手", "釜底抽薪", "逆转乾坤",
+        "爱恨交织", "背水一战", "柳暗花明", "终极抉择", "圆满新生",
+    ]
+
+    # ── Mock 剧情模板（循环使用）──
+    mock_summaries = [
+        "苏念薇携神医传承归来，在机场遭遇苏家冷遇，但她已不是当年任人欺凌的私生女。",
+        "苏家宴会上，苏若兰当众羞辱苏念薇的身世，一场豪门暗战正式拉开帷幕。",
+        "宴会上贵宾突发急症，苏念薇以神医师承一针救命，全场震惊，顾景琛目光中闪过一丝欣赏。",
+        "苏若兰设计陷害苏念薇偷窃珠宝，反被监控揭露与神秘男子密会，局面开始逆转。",
+        "苏念薇以医术在京城打开局面，念安堂医馆低调开业，第一位病人却浑身是血。",
+        "神秘病人说出苏念薇母亲死因的线索，苏家开始疯狂反扑，步步紧逼。",
+        "苏念薇联合顾景琛对苏家发起反击，曝光苏家医疗事故丑闻，舆论哗然。",
+        "DNA报告震惊全场——苏念薇竟是苏震天的亲生女儿，但报告很快被证明是伪造。",
+        "苏念薇发现自己真正的身世与隐世家族有关，格局瞬间升级。",
+        "苏震天狗急跳墙全面围剿，医馆被封，苏念薇被陷害入狱，至暗时刻降临。",
+        "狱中神秘人物现身，苏念薇获得隐世家族支持，重整旗鼓准备反击。",
+        "苏念薇暗中布局，联合顾景琛瓦解长老势力，两人暗度陈仓配合默契。",
+        "商业战场上棋逢对手，苏念薇以智慧破解困局，每一步都精准打击。",
+        "隐世家族内部权力斗争白热化，苏念薇釜底抽薪瓦解反对势力。",
+        "终极对决中苏念薇碾压式胜利，苏家帝国轰然崩塌，苏若兰被送进精神病院。",
+        "苏震天临终前透露真正幕后黑手，真相令人唏嘘——一切源于三十年前的误会。",
+        "顾景琛为救苏念薇身负重伤，苏念薇拼尽全力救治，三天三夜守护终于等来转机。",
+        "苏念薇放下仇恨选择原谅，创办念安公益医院，开启人生新篇章。",
+        "隐世家族最后通牒——继承家主之位或失去一切，苏念薇做出终极抉择。",
+        "全城烟花下顾景琛单膝跪地求婚，苏念薇含泪点头，新的人生就此展开。",
+    ]
+
+    mock_hooks = [
+        "手机收到匿名威胁短信：「离开京城，否则后果自负。」",
+        "顾景琛在阴影中注视着她，嘴角浮现一丝玩味的笑意。",
+        "苏若兰在暗处露出诡异的笑容，手中的酒杯被她捏得发白。",
+        "监控意外拍到苏家主母与神秘男子密会——这个男人是谁？",
+        "神秘病人醒来后说出一句话：「你母亲不是意外死的。」",
+        "护士交出一份发黄的病历——上面写着一个陌生男人的名字。",
+        "苏念薇接到的那个深夜电话，对方却沉默不语，只有沉重的呼吸声。",
+        "DNA报告是假的——苏震天才是冒牌货，她另有生父。",
+        "一封匿名信出现在苏念薇枕边，信封上印着隐世家族的徽章。",
+        "狱中神秘人物现身——自称是苏念薇生父的使者。",
+        "顾景琛与苏家决裂，身负重伤倒在苏念薇怀中。",
+        "苏震天临终前透露——害死母亲的另有其人。",
+        "真凶竟然是顾景琛已故的母亲——一场跨越两代人的恩怨。",
+        "隐世家族长老以顾景琛性命相威胁，苏念薇必须在爱人与家族间做选择。",
+        "爆炸中顾景琛用身体护住了苏念薇——他还能活下来吗？",
+        "苏若兰从精神病院逃出，持刀冲向台上的苏念薇。",
+        "病床上的顾景琛手指微微动了——他醒过来了。",
+        "社会各界被苏念薇帮助过的人纷纷伸出援手，形成一股不可阻挡的力量。",
+        "苏念薇做出最终决定——她的选择出乎所有人的意料。",
+        "画面定格在两人相拥的剪影，烟花在夜空中绽放——新的人生，新的开始。",
+    ]
+
+    cards = []
+    for ep in range(1, total + 1):
+        scores = _arc_scores(ep, total)
+        title_idx = min(ep - 1, len(mock_titles) - 1)
+        # 标题做一点变化防止完全相同
+        title = mock_titles[title_idx]
+        if ep > len(mock_titles):
+            title = f"{title}（续{ep // len(mock_titles) + 1}）"
+
+        cards.append(EpisodeCard(
+            episode_num=ep,
+            title=title,
+            summary=mock_summaries[(ep - 1) % len(mock_summaries)],
+            cliffhanger=mock_hooks[(ep - 1) % len(mock_hooks)],
+            conflict_intensity=scores["conflict"],
+            pleasure_index=scores["pleasure"],
+            hook_strength=scores["hook"],
+            emotional_resonance=scores["emotion"],
+        ))
+
+    return cards
+
+
 def generate_mock_script_stream(
     topic: str, episode_list: str,
     start_ep: int = 1, end_ep: int | None = None,
     total_episodes: int = 100,
 ) -> Generator[tuple[str, Optional[TokenUsage]], None, None]:
-    """Mock 剧本流式生成 — 预览前 10 集 + 末集"""
+    """Mock 剧本流式生成 — 覆盖全部集数，每 5 集一组"""
     if end_ep is None:
         end_ep = total_episodes
 
-    # 动态生成足够的 mock 对白样本
-    samples = []
-    for ep in range(start_ep, min(start_ep + 10, end_ep + 1)):
-        samples.append(f"""
-【第 {ep} 集】命运转折
-
-[场景：京城 · 日]
-
-苏念薇：（站在医馆门口，目光坚定）从今天起，没有人能再踩在我头上。
-顾客甲：（窃窃私语）听说她就是苏家那个私生女……
-顾客乙：嘘——她可是救了陆老爷子的人！
-苏念薇：（转身，微笑）各位请进，念安堂今日义诊。
-
-[场景：苏家豪宅 · 同日]
-
-苏若兰：（摔碎茶杯）她居然真的开了医馆！
-苏震天：（背对镜头）急什么。她越出头，摔得越惨。
-苏若兰：（眼中闪过寒光）父亲的意思是……
-苏震天：让她得意几天。到时候……（冷笑）连根拔起。
-
-[转场]
-""")
-
-    # 如果跨越很大，加一个末集
-    if end_ep > start_ep + 10:
-        samples.append(f"""
-【第 {end_ep} 集】终章·新篇
-
-[场景：京城 · 夜 · 全城烟花]
-
-顾景琛：（单膝跪地）苏念薇，嫁给我。
-苏念薇：（眼中含泪，嘴角带笑）我等这句话，等了三年。
-（烟花在夜空中绽放）
-（画面定格在两人相拥的剪影）
-
-[全剧终]
-""")
-
     total_usage = TokenUsage()
-    for idx, sample in enumerate(samples):
-        ep_label = start_ep + idx if idx < len(samples) - 1 else (end_ep if end_ep > start_ep + 10 else start_ep + idx)
-        header = f"\n\n## 第 {ep_label} 集\n\n"
+
+    # 按 5 集一批生成，覆盖全部集数
+    for batch_start in range(start_ep, end_ep + 1, 5):
+        batch_end = min(batch_start + 4, end_ep)
+        header = f"\n\n## 第 {batch_start}~{batch_end} 集\n\n"
         for ch in header:
             yield ch, None
 
-        for ch in sample:
-            time.sleep(MOCK_TOKEN_DELAY * (0.2 + random.random() * 0.5))
-            yield ch, None
+        for ep in range(batch_start, batch_end + 1):
+            # 每集动态生成分镜头剧本
+            ep_text = f"""
+第 {ep} 集：命运转折
 
-        usage = TokenUsage(input_tokens=500, output_tokens=len(sample) // 2)
-        total_usage.input_tokens += usage.input_tokens
-        total_usage.output_tokens += usage.output_tokens
-        yield "", usage
+【镜1】全景
+📍 念安堂医馆门口 · 清晨 · 暖阳初照
+📷 医馆大门缓缓打开，阳光涌入。苏念薇站在门口，金色的晨光为她镀上一层光晕。
+🎙️ 鸟鸣声清脆
+
+苏念薇（内心独白）：从今天起，没有人能再踩在我头上。
+
+【镜2】中景
+📷 路过的街坊停下脚步，三三两两交头接耳。镜头扫过他们的表情——好奇、怀疑、不屑。
+
+路人甲：（掩嘴低语）听说她就是苏家那个私生女……
+路人乙：（扯了扯路人甲衣袖）嘘——她可是救了陆老爷子的人！
+
+【镜3】近景 · 推
+📷 苏念薇转身面对众人，脸上浮现从容的微笑。镜头缓缓推近，她的眼神坚定而明亮。
+
+苏念薇：各位请进，念安堂今日义诊。
+
+【镜4】全景
+📍 苏家豪宅客厅 · 同日 · 阴冷色调
+📷 镜头从奢华的吊灯缓缓摇下，落在地板上摔碎的茶杯上。茶水横流，瓷片四溅。
+🎙️ 茶杯摔碎的余音回荡
+
+【镜5】近景
+📷 苏若兰胸口起伏，双目泛红。她的手紧紧攥着手机，屏幕上正是念安堂开业的照片。
+
+苏若兰：（咬牙）她居然真的开了医馆！
+
+【镜6】中景
+📷 苏震天背对镜头站在窗前，窗帘缝隙透进的光在他脸上切割出一道明暗分界。
+
+苏震天：（语气阴冷）急什么。她越出头，摔得越惨。
+苏若兰：（眼中闪过寒光）父亲的意思是……
+
+【镜7】特写 · 慢推
+📷 苏震天缓缓转过身，嘴角的冷笑被特写放大。镜头推到他冰冷的眼瞳。
+
+苏震天：让她得意几天。到时候……连根拔起。
+
+【镜8】近景 · 固定
+📷 苏若兰的表情由愤怒转为阴毒，嘴角缓缓勾起一抹笑。背景中光线渐暗，她的半边脸隐入阴影。
+🎙️ 不祥的低音弦乐渐起
+
+[黑场 · 字幕：危机正在酝酿]
+"""
+            for ch in ep_text:
+                time.sleep(MOCK_TOKEN_DELAY * (0.2 + random.random() * 0.5))
+                yield ch, None
+
+            usage = TokenUsage(input_tokens=500, output_tokens=len(ep_text) // 2)
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
+            yield "", usage
 
     yield "", TokenUsage(
         input_tokens=total_usage.input_tokens,

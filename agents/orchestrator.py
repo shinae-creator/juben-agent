@@ -226,20 +226,16 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def generate_episodes(self, outline: str) -> GenResult:
+        total = self._total_episodes
         self._emit("stage", "📑 分集架构师 Agent 启动")
-        self._emit("step", "切分 100 集卡点清单…")
+        self._emit("step", f"切分 {total} 集卡点清单（JSON 结构化）…")
         t0 = time.time()
 
-        total = self._total_episodes
-        groups = total // 10
-        system, user = fmt_episode(total, outline)
-        # 额外强制要求（兜底）
+        system, user = fmt_episode(total, outline, use_json=True)
+        # 额外强制要求（兜底 — JSON 格式也加一句强调）
         extra = (
-            f"\n\n【强制要求】\n"
-            f"1. 开头必须输出一行概况：「本剧共 {total} 集，分为 {groups} 个段落，每 10 集为一个高潮单元。」\n"
-            f"2. 必须完整输出全部 {total} 集，一集都不能少，禁止省略和缩写。\n"
-            f"3. 每集严格按「第 X 集：核心事件 / 冲突点 / 结尾钩子」格式输出。\n"
-            f"4. 第 {total} 集为「★ 高潮集 · 大结局」。\n"
+            f"\n\n【再次强调】输出纯 JSON 数组，共 {total} 个元素。"
+            f"以 [ 开头，以 ] 结尾。评分必须自然波动。第 {total} 集四维全部 9-10 分。"
         )
         full_user = user + extra
 
@@ -254,15 +250,15 @@ class Orchestrator:
                 api_base=self._api_base,
             )
         except Exception:
-            logger.warning("一次性生成百集失败，回退分批模式")
+            logger.warning("一次性生成分集失败，回退分批模式")
             content, usage = self._generate_episodes_batched(outline)
 
         self._cumulative_usage.input_tokens += usage.input_tokens
         self._cumulative_usage.output_tokens += usage.output_tokens
         elapsed = time.time() - t0
 
-        # 统计实际生成集数
-        ep_count = len(re.findall(r"第\s*\d+\s*集", content))
+        # 统计实际生成集数（JSON 或 旧格式）
+        ep_count = _count_episodes(content)
         self._emit("token", f"输入 {usage.input_tokens:,} | 输出 {usage.output_tokens:,} | 累计 {self._cumulative_usage.total:,} tokens | 检测到 {ep_count} 集")
         self._emit("done", f"分集清单生成完毕，共 {ep_count} 集，耗时 {elapsed:.0f}s")
         return GenResult(content=content, usage=usage, elapsed_seconds=elapsed)
@@ -272,7 +268,7 @@ class Orchestrator:
         total_usage = TokenUsage()
         total = self._total_episodes
         batch_count = max(total // EPISODES_PER_BATCH, 1)
-        system, base_user = fmt_episode(total, outline)
+        system, base_user = fmt_episode(total, outline, use_json=True)
 
         for i in range(batch_count):
             start = i * EPISODES_PER_BATCH + 1
@@ -280,8 +276,8 @@ class Orchestrator:
             self._emit("step", f"分批：第 {start}~{end} 集 ({i+1}/{batch_count})")
 
             extra = (
-                f"\n\n【强制要求】只输出第 {start}~{end} 集，"
-                f"每集按「第 X 集：核心事件 / 冲突点 / 结尾钩子」格式。禁止省略。"
+                f"\n\n【强制要求】只输出第 {start}~{end} 集的 JSON 数组元素。"
+                f"以 [ 开头，以 ] 结尾。每个元素含 episode_num/title/summary/cliffhanger + 4 维评分。"
             )
             prompt = base_user + extra
             text, usage = _llm_call(
@@ -297,7 +293,7 @@ class Orchestrator:
             total_usage.input_tokens += usage.input_tokens
             total_usage.output_tokens += usage.output_tokens
 
-        return "\n\n".join(batches), total_usage
+        return "\n".join(batches), total_usage
 
     # ------------------------------------------------------------------
     # 阶段一（流式版）：逐 token yield，前端实时展示
@@ -339,13 +335,13 @@ class Orchestrator:
         """流式生成分集清单，逐 token yield。"""
         total = self._total_episodes
         self._emit("stage", "📑 分集架构师 Agent 启动（流式）")
-        self._emit("step", f"切分 {total} 集卡点清单…")
+        self._emit("step", f"切分 {total} 集卡点清单（JSON 结构化）…")
 
-        system, user = fmt_episode(total, outline)
-        # 额外强制要求（兜底）
+        system, user = fmt_episode(total, outline, use_json=True)
+        # 额外强制要求（兜底 — JSON 格式）
         extra = (
-            f"\n\n【再次强调】必须完整输出全部 {total} 集。"
-            f"一集都不能少。第 {total} 集为大结局高潮集。"
+            f"\n\n【再次强调】输出纯 JSON 数组，{total} 个元素。"
+            f"以 [ 开头，以 ] 结尾。评分必须自然波动。第 {total} 集四维全部 9-10 分。"
         )
         full_user = user + extra
 
@@ -443,8 +439,25 @@ class Orchestrator:
     def cumulative_usage(self) -> TokenUsage:
         return self._cumulative_usage
 
+    def _parse_episode_blocks(self, episode_text: str, start_ep: int, end_ep: int) -> list[str]:
+        """解析分集文本为单集 block 列表。
+
+        自动检测格式：JSON（以 [ 开头）→ 旧 markdown。
+        """
+        stripped = episode_text.strip()
+        if stripped.startswith("["):
+            # JSON 格式：先转为 markdown 再解析
+            try:
+                from .episode_parser import parse_episodes, serialize_to_markdown
+                total_hint = max(end_ep, self._total_episodes)  # 正确的集数上界
+                cards = parse_episodes(episode_text, total_episodes=total_hint)
+                episode_text = serialize_to_markdown(cards)
+            except Exception:
+                logger.warning("JSON→markdown 转换失败，回退原始正则解析")
+        return self._parse_episode_blocks_legacy(episode_text, start_ep, end_ep)
+
     @staticmethod
-    def _parse_episode_blocks(episode_text: str, start_ep: int, end_ep: int) -> list[str]:
+    def _parse_episode_blocks_legacy(episode_text: str, start_ep: int, end_ep: int) -> list[str]:
         pattern = r"(第\s*\d+\s*集[\s\S]*?)(?=第\s*\d+\s*集|$)"
         blocks = []
         for m in re.finditer(pattern, episode_text):
@@ -454,6 +467,16 @@ class Orchestrator:
                 if start_ep <= ep_num <= end_ep:
                     blocks.append(m.group(1).strip())
         return blocks
+
+
+def _count_episodes(content: str) -> int:
+    """统计分集内容中的集数（兼容 JSON 和旧 markdown 格式）。"""
+    # JSON 格式：统计 "episode_num" 出现次数
+    json_count = len(re.findall(r'"episode_num"\s*:', content))
+    if json_count > 0:
+        return json_count
+    # 旧格式：统计 "第 X 集" 出现次数
+    return len(re.findall(r"第\s*\d+\s*集", content))
 
 
 def check_llm_connection() -> tuple[bool, str]:

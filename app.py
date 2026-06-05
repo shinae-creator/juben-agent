@@ -13,11 +13,14 @@ v5 增强：
 import os
 import re
 import time
+import math
 
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime
 from typing import Optional
 
+from config import EPISODES_PER_BATCH as SCRIPT_BATCH_SIZE
 from agents import Orchestrator
 from agents.orchestrator import ProgressEvent, TokenUsage
 from agents.mock import (
@@ -131,6 +134,8 @@ DEFAULTS = {
     "episode_confirmed": False,
     "script_content": "",
     "script_generating": False,
+    "_script_accumulated": "",       # 流式生成累积内容（防 rerun 丢失）
+    "_script_streaming": False,      # 流式生成进行中标记（防 rerun 重建生成器）
     "status_message": "",
     # v2 新增
     "generation_log": [],        # [(timestamp, icon, message), ...]
@@ -140,10 +145,14 @@ DEFAULTS = {
     # v5: 测试模式 & widget 状态同步
     "test_mode": False,
     # v6: 集数选择 & LLM 配置
-    "total_episodes": 100,
-    "active_llm_model": "",  # 空 = 使用默认
+    "total_episodes": 20,     # 默认 20 集精品短剧
+    "active_llm_model": "",   # 空 = 使用默认
     # v7: 按项目文件夹保存
     "project_folder": "",
+    # v8: 结构化分集 + 可视化大盘
+    "episode_cards": [],          # List[EpisodeCard] — 结构化分集数据
+    "episode_json_raw": "",       # 原始 JSON 字符串（调试用）
+    "episode_editor_mode": "visual",  # "visual" | "raw"
 }
 
 for key, default in DEFAULTS.items():
@@ -365,7 +374,7 @@ with left_col:
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ============================
-    # 卡点二：分集
+    # 卡点二：分集（V2: 可视化大盘 + 原始文本双模式）
     # ============================
     episode_locked = get_stage_index(st.session_state.workflow_stage) < get_stage_index("episode_review")
     episode_active = st.session_state.workflow_stage == "episode_review"
@@ -383,23 +392,186 @@ with left_col:
         elif episode_active: st.markdown('<span class="card-badge badge-checkpoint">⏳ 待审定</span>', unsafe_allow_html=True)
         else: st.markdown('<span class="card-badge badge-pending">🔒 等待中</span>', unsafe_allow_html=True)
 
+    # ── 评分颜色方案 ──
+    SCORE_COLORS = {
+        "conflict_intensity": "#e74c3c",
+        "pleasure_index": "#f39c12",
+        "hook_strength": "#9b59b6",
+        "emotional_resonance": "#3498db",
+    }
+    SCORE_LABELS = {
+        "conflict_intensity": "冲突",
+        "pleasure_index": "爽感",
+        "hook_strength": "悬念",
+        "emotional_resonance": "情感",
+    }
+
+    def _score_bar_html(value: int, dim_key: str) -> str:
+        """单条评分进度条 HTML"""
+        color = SCORE_COLORS.get(dim_key, "#888")
+        label = SCORE_LABELS.get(dim_key, dim_key)
+        pct = value * 10
+        return (
+            f'<div style="flex:1;min-width:50px;text-align:center;margin:0 2px;">'
+            f'<div style="font-size:0.55rem;color:#999;margin-bottom:1px;">{label}</div>'
+            f'<div style="background:#eee;height:5px;border-radius:3px;width:100%;">'
+            f'<div style="background:{color};height:5px;border-radius:3px;width:{pct}%;"></div>'
+            f'</div>'
+            f'<div style="font-size:0.65rem;font-weight:700;color:{color};margin-top:1px;">{value}</div>'
+            f'</div>'
+        )
+
+    def _avg_color(avg: float) -> str:
+        if avg >= 8: return "#28a745"
+        elif avg >= 6: return "#f39c12"
+        elif avg >= 4: return "#e67e22"
+        else: return "#e74c3c"
+
     if episode_done:
         st.text_area("分集清单（已确认）", value=st.session_state.episode_list, height=280, disabled=True, key=f"ep_done_v{st.session_state._episode_version}")
     elif not episode_locked:
-        # 版本化 key：每次外部更新（AI 生成 / 导入）会递增版本号
-        editor_key = f"episode_editor_v{st.session_state._episode_version}"
-        edited = st.text_area(
-            "100集分集卡点，可直接编辑：", value=st.session_state.episode_list, height=280,
-            placeholder="大纲确认后自动生成…", key=editor_key,
+        # ── 编辑模式切换 ──
+        cards = st.session_state.get("episode_cards", [])
+        has_cards = bool(cards and len(cards) > 0)
+        mode_options = ["📊 可视化大盘", "📝 原始文本"]
+        default_mode_idx = 0 if (has_cards and st.session_state.get("episode_editor_mode") == "visual") else 1
+        if not has_cards:
+            default_mode_idx = 1  # 无结构化数据时强制原始文本
+        edit_mode = st.radio(
+            "编辑模式", mode_options, horizontal=True,
+            key="ep_edit_mode_radio",
+            index=default_mode_idx,
+            label_visibility="collapsed",
         )
-        st.session_state.episode_list = edited
+        st.session_state.episode_editor_mode = "visual" if "可视化" in edit_mode else "raw"
+
+        if "可视化" in edit_mode and has_cards:
+            # ═══════════════ 可视化大盘 ═══════════════
+            # 数据概览
+            all_scores = [(c.avg_score, c) for c in cards]
+            if all_scores:
+                best = max(all_scores, key=lambda x: x[0])
+                worst = min(all_scores, key=lambda x: x[0])
+                avg_all = sum(s for s, _ in all_scores) / len(all_scores)
+                cols_kpi = st.columns(4)
+                cols_kpi[0].metric("📊 均分", f"{avg_all:.1f}")
+                cols_kpi[1].metric("🏆 最强集", f"第{best[1].episode_num}集 {best[0]:.1f}")
+                cols_kpi[2].metric("⚠️ 弱集", f"第{worst[1].episode_num}集 {worst[0]:.1f}")
+                cols_kpi[3].metric("📋 总集数", len(cards))
+
+            # 数据大盘表格（带进度条）
+            df_data = []
+            for card in cards:
+                df_data.append({
+                    "集": card.episode_num,
+                    "标题": card.title,
+                    "🔥 冲突": card.conflict_intensity * 10,
+                    "⚡ 爽感": card.pleasure_index * 10,
+                    "🪝 悬念": card.hook_strength * 10,
+                    "💙 情感": card.emotional_resonance * 10,
+                    "均分": f"{card.avg_score:.1f}",
+                })
+            st.dataframe(
+                df_data,
+                column_config={
+                    "集": st.column_config.NumberColumn("集", width="small"),
+                    "标题": st.column_config.TextColumn("标题", width="medium"),
+                    "🔥 冲突": st.column_config.ProgressColumn("冲突烈度", min_value=0, max_value=100, format="%d/10", width="small"),
+                    "⚡ 爽感": st.column_config.ProgressColumn("爽感爆发度", min_value=0, max_value=100, format="%d/10", width="small"),
+                    "🪝 悬念": st.column_config.ProgressColumn("悬念钩子度", min_value=0, max_value=100, format="%d/10", width="small"),
+                    "💙 情感": st.column_config.ProgressColumn("情感共鸣度", min_value=0, max_value=100, format="%d/10", width="small"),
+                    "均分": st.column_config.TextColumn("均分", width="small"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=min(35 * len(cards) + 38, 500),
+            )
+
+            # ── 单集微调表单 ──
+            st.markdown("---")
+            st.markdown("#### ✏️ 单集微调")
+            ep_nums = [c.episode_num for c in cards]
+            selected_ep = st.selectbox(
+                "选择要编辑的集数：", ep_nums,
+                format_func=lambda n: f"第{n}集 · {cards[n-1].title if n <= len(cards) else ''}",
+                key="ep_detail_select",
+            )
+            if selected_ep and selected_ep <= len(cards):
+                card = cards[selected_ep - 1]
+                with st.form(key=f"ep_edit_form_{selected_ep}"):
+                    fc1, fc2 = st.columns([3, 1])
+                    with fc1:
+                        new_title = st.text_input("标题", value=card.title, key=f"et_{selected_ep}")
+                        new_summary = st.text_area("核心剧情概要", value=card.summary, height=68, key=f"es_{selected_ep}")
+                    with fc2:
+                        # 评分雷达预览
+                        bars_html = "".join([
+                            _score_bar_html(getattr(card, f), f)
+                            for f in ["conflict_intensity", "pleasure_index", "hook_strength", "emotional_resonance"]
+                        ])
+                        st.markdown(
+                            f'<div style="display:flex;gap:4px;margin-top:4px;">{bars_html}</div>'
+                            f'<div style="text-align:center;font-size:0.8rem;color:#888;margin-top:4px;">均分 {card.avg_score:.1f}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    new_cliffhanger = st.text_area("结尾钩子", value=card.cliffhanger, height=56, key=f"ec_{selected_ep}")
+                    sc1, sc2, sc3, sc4 = st.columns(4)
+                    with sc1:
+                        new_conflict = st.slider("🔥 冲突烈度", 0, 10, card.conflict_intensity, key=f"scr_{selected_ep}")
+                    with sc2:
+                        new_pleasure = st.slider("⚡ 爽感爆发度", 0, 10, card.pleasure_index, key=f"spl_{selected_ep}")
+                    with sc3:
+                        new_hook = st.slider("🪝 悬念钩子度", 0, 10, card.hook_strength, key=f"shk_{selected_ep}")
+                    with sc4:
+                        new_emotion = st.slider("💙 情感共鸣度", 0, 10, card.emotional_resonance, key=f"sem_{selected_ep}")
+
+                    if st.form_submit_button("💾 保存修改", use_container_width=True):
+                        card.title = new_title
+                        card.summary = new_summary
+                        card.cliffhanger = new_cliffhanger
+                        card.conflict_intensity = new_conflict
+                        card.pleasure_index = new_pleasure
+                        card.hook_strength = new_hook
+                        card.emotional_resonance = new_emotion
+                        # 同步回 episode_list
+                        try:
+                            from agents.episode_parser import serialize_to_markdown
+                            st.session_state.episode_list = serialize_to_markdown(st.session_state.episode_cards)
+                        except Exception:
+                            pass
+                        _bump_episode_version()
+                        st.session_state.status_message = f"第{selected_ep}集已更新！"
+                        st.rerun()
+
+            # ── 如果解析可能不完整，给出提示 ──
+            if not any(c.conflict_intensity != 5 for c in cards):
+                st.caption("⚠️ AI 未输出结构化评分，显示为默认值 5。您可手动调整评分。")
+
+        else:
+            # ═══════════════ 原始文本模式（兼容旧版） ═══════════════
+            editor_key = f"episode_editor_v{st.session_state._episode_version}"
+            edited = st.text_area(
+                f"{st.session_state.total_episodes}集分集卡点，可直接编辑：",
+                value=st.session_state.episode_list, height=280,
+                placeholder="大纲确认后自动生成…", key=editor_key,
+            )
+            st.session_state.episode_list = edited
+            # 原始文本编辑后尝试重新解析结构化数据
+            if edited.strip() and not has_cards:
+                try:
+                    from agents.episode_parser import parse_episodes
+                    st.session_state.episode_cards = parse_episodes(edited, st.session_state.total_episodes)
+                except Exception:
+                    st.session_state.episode_cards = []
+
+        # ── 操作按钮（两种模式共用） ──
         b3, b4, b5 = st.columns([1, 1, 1])
         with b3:
             if st.button("✅ 确认并出本", use_container_width=True, key="btn_confirm_ep"):
                 if st.session_state.episode_list.strip():
                     st.session_state.episode_confirmed = True
                     st.session_state.workflow_stage = "generating"
-                    # ── 保存分集清单 ──
+                    # ── 保存分集清单（JSON 或旧格式均可）──
                     try:
                         save_episodes(st.session_state.topic, st.session_state.outline, st.session_state.episode_list)
                     except Exception:
@@ -410,7 +582,8 @@ with left_col:
         with b4:
             if st.button("🔄 重新切分", use_container_width=True, key="btn_regen_ep"):
                 st.session_state.episode_list = ""
-                _bump_episode_version()              # 清空分集 widget
+                st.session_state.episode_cards = []
+                _bump_episode_version()
                 st.session_state.status_message = "分集架构师重新切分中…"
                 st.rerun()
         with b5:
@@ -418,6 +591,7 @@ with left_col:
                 st.session_state.workflow_stage = "outline_review"
                 st.session_state.episode_confirmed = False
                 st.session_state.episode_list = ""
+                st.session_state.episode_cards = []
                 _bump_episode_version()
                 st.rerun()
     else:
@@ -542,13 +716,24 @@ with right_col:
                     f'<div class="script-canvas">{accumulated}</div>',
                     unsafe_allow_html=True,
                 )
-            # 统计集数
-            ep_count = len(re.findall(r"第\s*\d+\s*集", accumulated))
+            # 统计集数 + 结构化解析
             st.session_state.episode_list = accumulated
+            try:
+                from agents.episode_parser import parse_episodes
+                st.session_state.episode_cards = parse_episodes(accumulated, total_ep)
+                if st.session_state.episode_cards:
+                    st.session_state.episode_json_raw = accumulated
+                    st.session_state.episode_editor_mode = "visual"
+            except Exception:
+                st.session_state.episode_cards = []
+                st.session_state.episode_editor_mode = "raw"
+            ep_count = len(st.session_state.episode_cards) or len(re.findall(r"第\s*\d+\s*集", accumulated))
             _bump_episode_version()          # ← 触发新 widget key
             st.session_state._episode_streaming = False
             st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
-            st.session_state.status_message = f"百集卡点清单已生成（检测到 {ep_count} 集）！请在左侧审核修改后确认。"
+            has_scores = any(c.conflict_intensity != 5 for c in st.session_state.episode_cards) if st.session_state.episode_cards else False
+            score_note = "（含 AI 量化评分）" if has_scores else ""
+            st.session_state.status_message = f"分集清单已生成 {score_note}（检测到 {ep_count} 集）！请在左侧审核修改后确认。"
             st.rerun()
         except Exception as exc:
             st.session_state.status_message = f"❌ 分集生成失败: {exc}"
@@ -572,83 +757,191 @@ with right_col:
         )
     elif st.session_state.workflow_stage == "generating" and st.session_state.script_generating:
         # ---- 流式生成（逐 token 打字机） ----
-        test_mode = st.session_state.test_mode
         total_ep = st.session_state.total_episodes
-        if test_mode:
-            stream = generate_mock_script_stream(
-                topic=st.session_state.topic,
-                episode_list=st.session_state.episode_list,
-                total_episodes=total_ep,
-                end_ep=total_ep,
+        total_batches_script = max((total_ep + SCRIPT_BATCH_SIZE - 1) // SCRIPT_BATCH_SIZE, 1)
+
+        def _detect_completed_episodes(text: str) -> set[int]:
+            """从剧本文本中检测已生成完整的集数。
+            匹配单集标题「第 N 集：」或「第 N 集\n」，排除批次头「第 X~Y 集」。
+            """
+            completed = set()
+            # 匹配「第 N 集」后面跟中文冒号、英文冒号或换行（不是 ~ 或 ～）
+            for m in re.finditer(r'第\s*(\d+)\s*集(?!\s*[~～\d])', text):
+                completed.add(int(m.group(1)))
+            return completed
+
+        def _ep_status_html(completed: set[int], total: int) -> str:
+            """生成可折叠的集数完成度 HTML。"""
+            done = len(completed)
+            chips = []
+            for ep in range(1, total + 1):
+                if ep in completed:
+                    chips.append(
+                        f'<span style="display:inline-block;background:#d4edda;color:#155724;'
+                        f'padding:2px 7px;border-radius:3px;font-size:0.75rem;margin:1px;">✓ {ep}</span>'
+                    )
+                else:
+                    chips.append(
+                        f'<span style="display:inline-block;background:#e2e3e5;color:#6c757d;'
+                        f'padding:2px 7px;border-radius:3px;font-size:0.75rem;margin:1px;">· {ep}</span>'
+                    )
+            return (
+                f'<details style="margin-bottom:10px;">'
+                f'<summary style="cursor:pointer;font-size:0.85rem;font-weight:600;">'
+                f'📋 各集输出进度（{done}/{total} 集）</summary>'
+                f'<div style="margin-top:6px;line-height:1.8;">{"".join(chips)}</div>'
+                f'</details>'
             )
-            st.session_state.generation_log.append((time.time(), "🧪", f"测试模式：生成 {total_ep} 集 Mock 剧本"))
+
+        # 防 rerun 重启：如果正在流式中，只展示已累积内容，不重建生成器
+        if st.session_state.get("_script_streaming", False):
+            script_placeholder = st.empty()
+            token_placeholder = st.empty()
+            elapsed = time.time() - st.session_state.gen_start_time
+            tu = st.session_state.total_token_usage
+            token_placeholder.caption(
+                f"⏱ {elapsed:.0f}s | "
+                f"📥 输入 {tu['input']:,} | 📤 输出 {tu['output']:,} | "
+                f"🔥 合计 {tu['input'] + tu['output']:,} tokens"
+            )
+            script_placeholder.markdown(
+                f'<div class="script-canvas">{st.session_state._script_accumulated}</div>',
+                unsafe_allow_html=True,
+            )
         else:
-            llm = get_llm_params()
-            orch = Orchestrator(
-                on_event=make_event_handler(),
-                total_episodes=total_ep,
-                **llm,
-            )
-            stream = orch.generate_script_stream(
-                topic=st.session_state.topic,
-                episode_list=st.session_state.episode_list,
-                end_ep=total_ep,
-            )
-        script_placeholder = st.empty()
-        token_placeholder = st.empty()
-        accumulated = ""
+            st.session_state._script_streaming = True
+            st.session_state._script_accumulated = ""
+            batch_count = 0
+            test_mode = st.session_state.test_mode
 
-        try:
-            for chunk, batch_usage in stream:
-                accumulated += chunk
-                if batch_usage:
-                    st.session_state.total_token_usage["input"] += batch_usage.input_tokens
-                    st.session_state.total_token_usage["output"] += batch_usage.output_tokens
+            # ── 进度条 ──
+            progress_bar = st.progress(0, text=f"⏳ 准备生成... 0/{total_batches_script} 批")
+            # ── 集数完成度面板 ──
+            ep_status_placeholder = st.empty()
 
-                # 实时 Token 动态累加显示（类 Claude Code 效果）
-                elapsed = time.time() - st.session_state.gen_start_time
-                tu = st.session_state.total_token_usage
-                token_placeholder.caption(
-                    f"⏱ {elapsed:.0f}s | "
-                    f"📥 输入 {tu['input']:,} | 📤 输出 {tu['output']:,} | "
-                    f"🔥 合计 {tu['input'] + tu['output']:,} tokens"
+            if test_mode:
+                stream = generate_mock_script_stream(
+                    topic=st.session_state.topic,
+                    episode_list=st.session_state.episode_list,
+                    total_episodes=total_ep,
+                    end_ep=total_ep,
                 )
-                # 打字机画布
-                script_placeholder.markdown(
-                    f'<div class="script-canvas">{accumulated}</div>',
+                st.session_state.generation_log.append((time.time(), "🧪", f"测试模式：生成 {total_ep} 集 Mock 剧本"))
+            else:
+                llm = get_llm_params()
+                orch = Orchestrator(
+                    on_event=make_event_handler(),
+                    total_episodes=total_ep,
+                    **llm,
+                )
+                stream = orch.generate_script_stream(
+                    topic=st.session_state.topic,
+                    episode_list=st.session_state.episode_list,
+                    end_ep=total_ep,
+                )
+            script_placeholder = st.empty()
+            token_placeholder = st.empty()
+
+            def _auto_scroll():
+                """注入 JS 将页面滚到底部，让用户始终看到最新输出。"""
+                components.html("""
+<script>
+(function() {
+    try {
+        var el = parent.document.querySelector('[data-testid="stAppViewContainer"]');
+        if (el) el.scrollTop = el.scrollHeight;
+    } catch(e) {}
+    try {
+        parent.scrollTo(0, parent.document.body.scrollHeight);
+    } catch(e) {}
+})();
+</script>
+""", height=0)
+
+            try:
+                last_rendered_len = 0  # 增量渲染追踪：上次渲染时的字符数
+                for chunk, batch_usage in stream:
+                    st.session_state._script_accumulated += chunk
+                    if batch_usage:
+                        batch_count += 1
+                        st.session_state.total_token_usage["input"] += batch_usage.input_tokens
+                        st.session_state.total_token_usage["output"] += batch_usage.output_tokens
+
+                    cur_len = len(st.session_state._script_accumulated)
+                    # 增量渲染策略：
+                    # 1. 批次完成时（batch_usage 有值）→ 必定渲染（含进度条/集数面板/token 统计）
+                    # 2. 内容增长超过 INCREMENTAL_RENDER_CHARS → 渲染画布（让用户看到实时输出）
+                    INCREMENTAL_RENDER_CHARS = 400
+                    is_batch_done = batch_usage is not None
+                    should_render_incremental = (cur_len - last_rendered_len) >= INCREMENTAL_RENDER_CHARS
+
+                    if is_batch_done or should_render_incremental:
+                        if is_batch_done:
+                            # 进度条
+                            pct = batch_count / total_batches_script
+                            progress_bar.progress(pct, text=f"⏳ 生成中... {batch_count}/{total_batches_script} 批")
+                            # 集数完成度
+                            completed = _detect_completed_episodes(st.session_state._script_accumulated)
+                            ep_status_placeholder.markdown(
+                                _ep_status_html(completed, total_ep),
+                                unsafe_allow_html=True,
+                            )
+                            # Token 信息
+                            elapsed = time.time() - st.session_state.gen_start_time
+                            tu = st.session_state.total_token_usage
+                            token_placeholder.caption(
+                                f"⏱ {elapsed:.0f}s | "
+                                f"📥 输入 {tu['input']:,} | 📤 输出 {tu['output']:,} | "
+                                f"🔥 合计 {tu['input'] + tu['output']:,} tokens"
+                            )
+                        # 剧本画布（批次完成 + 增量都渲染）
+                        script_placeholder.markdown(
+                            f'<div class="script-canvas">{st.session_state._script_accumulated}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        # 自动滚屏到底部
+                        _auto_scroll()
+                        last_rendered_len = cur_len
+
+                # 完成：最终更新进度条和集数面板
+                completed = _detect_completed_episodes(st.session_state._script_accumulated)
+                progress_bar.progress(1.0, text="✅ 生成完毕！")
+                ep_status_placeholder.markdown(
+                    _ep_status_html(completed, total_ep),
                     unsafe_allow_html=True,
                 )
+                st.session_state.script_content = st.session_state._script_accumulated
+                st.session_state.script_generating = False
+                st.session_state._script_streaming = False
+                st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
+                st.session_state.workflow_stage = "done"
+                st.session_state.status_message = "✅ 剧本生成完毕！可下载或回看。"
 
-            st.session_state.script_content = accumulated
-            st.session_state.script_generating = False
-            st.session_state.gen_elapsed = time.time() - st.session_state.gen_start_time
-            st.session_state.workflow_stage = "done"
-            st.session_state.status_message = "✅ 剧本生成完毕！可下载或回看。"
+                # ---- 自动保存 ----
+                try:
+                    active_cfg = get_active_config(st.session_state.get("active_llm_model", ""))
+                    saved = save_script(
+                        topic=st.session_state.topic,
+                        outline=st.session_state.outline,
+                        episode_list=st.session_state.episode_list,
+                        script_content=st.session_state._script_accumulated,
+                        total_input_tokens=st.session_state.total_token_usage["input"],
+                        total_output_tokens=st.session_state.total_token_usage["output"],
+                        total_elapsed=st.session_state.gen_elapsed,
+                        model=active_cfg.get("model", "unknown"),
+                    )
+                    st.session_state.status_message += f" 📁 已保存到 `{os.path.basename(saved)}`"
+                except Exception as save_err:
+                    st.session_state.status_message += f" ⚠️ 保存失败: {save_err}"
 
-            # ---- 自动保存 ----
-            try:
-                active_cfg = get_active_config(st.session_state.get("active_llm_model", ""))
-                saved = save_script(
-                    topic=st.session_state.topic,
-                    outline=st.session_state.outline,
-                    episode_list=st.session_state.episode_list,
-                    script_content=accumulated,
-                    total_input_tokens=st.session_state.total_token_usage["input"],
-                    total_output_tokens=st.session_state.total_token_usage["output"],
-                    total_elapsed=st.session_state.gen_elapsed,
-                    model=active_cfg.get("model", "unknown"),
-                )
-                st.session_state.status_message += f" 📁 已保存到 `{os.path.basename(saved)}`"
-            except Exception as save_err:
-                st.session_state.status_message += f" ⚠️ 保存失败: {save_err}"
-
-            st.rerun()
-        except Exception as exc:
-            st.session_state.script_content = accumulated or "（生成中断）"
-            st.session_state.script_generating = False
-            st.session_state.workflow_stage = "done"
-            st.session_state.status_message = f"⚠️ 生成中断: {exc}"
-            st.rerun()
+                st.rerun()
+            except Exception as exc:
+                st.session_state.script_content = st.session_state._script_accumulated or "（生成中断）"
+                st.session_state.script_generating = False
+                st.session_state._script_streaming = False
+                st.session_state.workflow_stage = "done"
+                st.session_state.status_message = f"⚠️ 生成中断: {exc}"
+                st.rerun()
     else:
         placeholder_text = {
             "input": "编剧提交题材后，Agent 矩阵将自动构思…\n\n剧本将在此处以打字机效果流式呈现。",
@@ -698,7 +991,7 @@ with st.sidebar:
     st.markdown("#### 🎬 剧本集数")
     ep_option = st.selectbox(
         "选择总集数：",
-        options=["100 集（标准）", "30 集（精简）", "20 集（短篇）", "自定义"],
+        options=["20 集（短篇）", "30 集（精简）", "100 集（标准）", "自定义"],
         index=0,
         key="ep_select",
         disabled=st.session_state.topic_submitted and st.session_state.workflow_stage != "input",
@@ -806,6 +1099,13 @@ with st.sidebar:
             if st.button("📑 导入分集", use_container_width=True, key="btn_imp_ep"):
                 if imported_ep.strip():
                     st.session_state.episode_list = imported_ep.strip()
+                    # 尝试结构化解析
+                    try:
+                        from agents.episode_parser import parse_episodes
+                        st.session_state.episode_cards = parse_episodes(imported_ep.strip(), st.session_state.total_episodes)
+                        st.session_state.episode_editor_mode = "visual" if st.session_state.episode_cards else "raw"
+                    except Exception:
+                        st.session_state.episode_cards = []
                     _bump_episode_version()              # 触发新 widget key
                     st.session_state.workflow_stage = "episode_review"
                     st.session_state.status_message = "分集已导入，请审核后确认。"
@@ -820,6 +1120,12 @@ with st.sidebar:
                     _bump_outline_version()              # 触发新 widget key
                     st.session_state.outline_confirmed = True
                     st.session_state.episode_list = imported_ep.strip()
+                    # 尝试结构化解析
+                    try:
+                        from agents.episode_parser import parse_episodes
+                        st.session_state.episode_cards = parse_episodes(imported_ep.strip(), st.session_state.total_episodes)
+                    except Exception:
+                        st.session_state.episode_cards = []
                     _bump_episode_version()              # 触发新 widget key
                     st.session_state.episode_confirmed = True
                     st.session_state.workflow_stage = "generating"
@@ -851,6 +1157,13 @@ with st.sidebar:
                     ol = get_checkpoint_content(rec.id, "outline")
                     if ep:
                         st.session_state.episode_list = ep
+                        # 尝试结构化解析历史数据
+                        try:
+                            from agents.episode_parser import parse_episodes
+                            st.session_state.episode_cards = parse_episodes(ep, st.session_state.total_episodes)
+                            st.session_state.episode_editor_mode = "visual" if st.session_state.episode_cards else "raw"
+                        except Exception:
+                            st.session_state.episode_cards = []
                         _bump_episode_version()
                     if ol:
                         st.session_state.outline = ol

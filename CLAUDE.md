@@ -26,15 +26,17 @@ py -c "from agents.orchestrator import check_llm_connection; ok, msg = check_llm
 ## 架构
 
 ```
-app.py                     # Streamlit 前端（~750行），UI + session_state + 流式渲染
+app.py                     # Streamlit 前端（~1000行），UI + session_state + 流式渲染
 ├── config.py              # LLM 参数 + .env 加载（python-dotenv）
 ├── llm_config.py          # 多模型配置管理，JSON 持久化到 .claude/llm_configs.json
-├── history.py             # 生成记录，保存到 generations/<ts>_<slug>/
+├── history.py             # 生成记录，保存到 generations/<剧名>_<时间戳>/
 └── agents/
     ├── __init__.py         # 导出 Orchestrator
     ├── orchestrator.py     # Agent 矩阵编排器：三阶段流水线 + 流式/非流式 LLM 调用
-    ├── prompts.py          # 三大 Agent 系统提示词 + fmt_planner()/fmt_episode() 动态格式化
-    └── mock.py             # 测试模式 Mock 数据，不烧 Token
+    ├── prompts.py          # 三大 Agent 系统提示词（V2 JSON + LEGACY markdown）
+    ├── schemas.py          # Pydantic v2 EpisodeCard 数据模型（4维评分）
+    ├── episode_parser.py   # JSON/旧格式双向解析器 + 序列化
+    └── mock.py             # 测试模式 Mock 数据（V2 结构化 + 评分曲线）
 ```
 
 ### 数据流
@@ -91,4 +93,44 @@ Streamlit 的 `st.text_area(value=..., key=...)` 有一个陷阱：widget 一旦
 
 ### .gitignore
 
-排除 `__pycache__/`、`.claude/`、`*.pyc`、`test_*.py`、`.env`。
+排除 `__pycache__/`、`.claude/`、`*.pyc`、`test_*.py`、`.env`、`generations/`。
+
+## V2 结构化分集系统（v8 新增）
+
+### EpisodeCard 数据模型（`agents/schemas.py`）
+
+Pydantic v2 模型，每集包含 4 维评分（0-10）：
+- `conflict_intensity`（冲突烈度）、`pleasure_index`（爽感爆发度）、`hook_strength`（悬念钩子度）、`emotional_resonance`（情感共鸣度）
+- `avg_score` 属性计算均分
+
+### 数据流
+
+```
+LLM 输出 JSON 数组 → parse_episodes() → List[EpisodeCard]（可视化用）
+                   → serialize_to_markdown() → episode_list 文本（对白引擎用）
+```
+
+### 解析器（`agents/episode_parser.py`）
+
+- `parse_episodes(raw_text, total_episodes)` — JSON 优先 → 正则兜底 → 占位补齐
+- `serialize_to_markdown(cards)` — 序列化为兼容旧格式
+- `_parse_json_flexible()` — 处理围栏、尾逗号、截断
+- `_parse_legacy_markdown()` — 旧格式正则提取，评分默认 5
+
+### 前端双模式编辑
+
+卡点二分集审定区支持切换：
+- `📊 可视化大盘`：`st.dataframe` + `ProgressColumn` 进度条表格 + 单集 form 微调（slider 修改评分）
+- `📝 原始文本`：保留旧 text_area 完全不变
+
+### 新 session_state key
+
+- `episode_cards: list[EpisodeCard]` — 结构化分集数据
+- `episode_json_raw: str` — 原始 JSON 字符串
+- `episode_editor_mode: str` — "visual" | "raw"
+
+### Prompt 变更
+
+- `EPISODE_SYSTEM_V2` / `EPISODE_USER_V2`：要求 LLM 输出纯 JSON 数组
+- 旧 prompt 保留为 `EPISODE_SYSTEM_LEGACY` / `EPISODE_USER_LEGACY`
+- `fmt_episode(total_episodes, outline, use_json=True)` 控制切换

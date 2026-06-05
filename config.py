@@ -29,11 +29,11 @@ TEMPERATURE_SCRIPT = 0.9      # 对白生成（需要多样化的语言表达）
 
 MAX_TOKENS_OUTLINE = 8192     # 大纲输出上限
 MAX_TOKENS_EPISODES = 16384   # 百集清单输出上限（100集需要约12k tokens）
-MAX_TOKENS_SCRIPT = 8192      # 单批对白输出上限
+MAX_TOKENS_SCRIPT = 32768     # 单批对白输出上限（分镜头格式每集约 1500-3000 字，需充足空间）
 
 # ---- 百集切分配置 ----
-TOTAL_EPISODES = 100
-EPISODES_PER_BATCH = 10       # 每批生成的集数（减小批次让打字机更丝滑）
+TOTAL_EPISODES = 20  # 默认 20 集精品短剧
+EPISODES_PER_BATCH = 3        # 每批生成的集数（分镜头格式单集信息密度高，3集一批保完整）
 
 # ---- 剧本生成并发配置 ----
 SCRIPT_CONCURRENCY = 5        # 同时生成的集数
