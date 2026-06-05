@@ -6,6 +6,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 短剧 Agent 创作工作站 — 基于 Streamlit 的纯 Web 端短剧剧本 AI 生成工具。编剧无需接触终端，在网页上完成：输入题材 → AI 构思大纲 → 审核确认 → AI 拆分 N 集卡点 → 审核确认 → 流式生成剧本对白 → 一键下载。
 
+## 当用户要求部署本项目时的自动化流程
+
+如果用户说"帮我部署这个项目"或"帮我跑起来"，按以下步骤执行：
+
+### 第一步：拉取代码
+
+```powershell
+git clone https://github.com/shinae-creator/juben-agent.git
+cd juben-agent
+```
+
+如果用户电脑没有 git，引导用户安装 Git for Windows（https://git-scm.com/download/win）或直接下载 ZIP。
+
+### 第二步：检查 Python 环境
+
+```powershell
+py --version
+```
+
+如果 `py` 命令不存在：
+- **必须引导用户安装 Python 3.10+**：https://www.python.org/downloads/
+- 安装时**务必勾选 "Add Python to PATH"**（底部复选框）
+- 安装完成后让用户重新打开终端再试
+
+### 第三步：配置 API Key
+
+检查 `.env` 文件是否存在：
+```powershell
+Test-Path .env
+```
+
+如果不存在，引导用户创建：
+1. 注册 DeepSeek 账号：https://platform.deepseek.com
+2. 充值并创建 API Key
+3. 在项目目录创建 `.env` 文件，内容：
+```ini
+LLM_MODEL=openai/deepseek-v4-pro
+LLM_API_KEY=sk-你的密钥
+LLM_API_BASE=https://api.deepseek.com
+```
+
+可直接复制 `.env.example` 后让用户替换密钥。**不要让用户手动输入密钥到聊天中**。
+
+### 第四步：安装依赖
+
+```powershell
+py -m pip install -r requirements.txt
+```
+
+### 第五步：启动服务
+
+```powershell
+# 清理旧缓存（避免加载旧字节码）
+Remove-Item -Recurse -Force __pycache__ -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force agents\__pycache__ -ErrorAction SilentlyContinue
+
+# 启动
+py -m streamlit run app.py --server.headless true --server.port 8501
+```
+
+启动后浏览器打开 `http://localhost:8501`。
+
+### 第六步：验证
+
+```powershell
+py -c "from agents.orchestrator import check_llm_connection; ok, msg = check_llm_connection(); print(msg)"
+```
+
+### 常见问题处理
+
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| `py` 命令找不到 | Python 未安装或没勾 Add to PATH | 重装 Python 并勾选 |
+| `No module named 'streamlit'` | 依赖未安装 | 执行 `py -m pip install -r requirements.txt` |
+| 端口 8501 被占用 | 已有 Streamlit 在跑 | 先 `taskkill /F /IM python.exe`，或换端口 `--server.port 8502` |
+| LLM 连接失败 | API Key 错误或网络不通 | 检查 `.env` 密钥、检查能否访问 api.deepseek.com |
+| 修改代码后不生效 | 字节码缓存 | 删除 `__pycache__` 再重启 |
+| 想先测试不花钱 | 未开测试模式 | 侧边栏勾选 `🧪 测试模式`，零费用秒出结果 |
+
+## 部署（给新电脑用）
+
 ## 部署（给新电脑用）
 
 此项目面向非技术编剧用户，必须提供**零终端**的启动体验。
