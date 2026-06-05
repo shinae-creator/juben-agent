@@ -6,12 +6,62 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 短剧 Agent 创作工作站 — 基于 Streamlit 的纯 Web 端短剧剧本 AI 生成工具。编剧无需接触终端，在网页上完成：输入题材 → AI 构思大纲 → 审核确认 → AI 拆分 N 集卡点 → 审核确认 → 流式生成剧本对白 → 一键下载。
 
+## 部署（给新电脑用）
+
+此项目面向非技术编剧用户，必须提供**零终端**的启动体验。
+
+### 新电脑初始化（3 步）
+
+```
+1. 安装 Python 3.10+（必须勾选 "Add Python to PATH"）
+2. 创建 .env 文件，填入 DeepSeek API Key（参照 .env.example）
+3. 双击 启动.bat
+```
+
+### 交付文件清单
+
+以下文件是他人部署所需（已在 git 中）：
+
+| 文件 | 用途 |
+|------|------|
+| `启动.bat` | 双击自动装依赖 + 启动服务，零终端操作 |
+| `requirements.txt` | pip 依赖清单（streamlit, litellm, pydantic, python-dotenv） |
+| `.env.example` | API Key 配置模板，复制为 `.env` 后填入真实密钥 |
+| `README.md` | 用户面向的完整部署指南 + FAQ |
+
+### .env 配置
+
+```ini
+LLM_MODEL=openai/deepseek-v4-pro
+LLM_API_KEY=sk-你的DeepSeek密钥
+LLM_API_BASE=https://api.deepseek.com
+```
+
+`.env` 在 `.gitignore` 中，不会被提交。`.env.example` 是模板文件，会被提交。
+
+### 启动.bat 行为
+
+- 检测 Python 是否安装（`py --version`）
+- 自动执行 `py -m pip install -r requirements.txt`
+- 启动 Streamlit 于 8501 端口
+- 浏览器打开 `http://localhost:8501`
+
+### 依赖
+
+```
+streamlit>=1.58.0    # Web UI 框架
+litellm>=1.87.0      # LLM 统一调用层（兼容 OpenAI/DeepSeek 等）
+pydantic>=2.13.4     # 结构化数据校验
+python-dotenv>=1.2.2 # .env 环境变量加载
+```
+
 ## 常用命令
 
 ```powershell
 # 启动（Windows，必须用 py -m，不能用 bash 的 streamlit 命令）
-cd L:\vscod\juben-agent
 py -m streamlit run app.py --server.headless true --server.port 8501
+
+# 或双击 启动.bat（自动安装依赖 + 启动）
 
 # 重启前务必清除 Python 字节码缓存，否则修改不生效
 taskkill /F /IM streamlit.exe 2>$null; taskkill /F /IM python.exe 2>$null
