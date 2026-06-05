@@ -26,17 +26,62 @@ app.py                     # Streamlit 前端（~750行），UI + session_state 
     └── mock.py             # 测试模式 Mock 数据，不烧 Token
 ```
 
-## 启动方式
+## 🚀 部署到其他电脑（3 步上手）
+
+### 第一步：安装 Python
+
+需要 **Python 3.10 或更高版本**。
+
+下载安装：https://www.python.org/downloads/
+
+> ⚠️ 安装时务必勾选 **「Add Python to PATH」**（底部复选框）
+
+安装后验证：打开 PowerShell 或 CMD，输入 `py --version`，能看到版本号即可。
+
+### 第二步：配置 API Key
+
+在项目根目录创建 `.env` 文件（注意：文件名就是 `.env`，没有前缀）：
+
+```
+LLM_MODEL=openai/deepseek-v4-pro
+LLM_API_KEY=sk-你的DeepSeek密钥
+LLM_API_BASE=https://api.deepseek.com
+```
+
+> 🔑 DeepSeek API Key 获取：注册 https://platform.deepseek.com → 充值 → API Keys 页面创建
+
+### 第三步：双击启动
+
+双击项目根目录的 **`启动.bat`**，脚本会自动安装依赖并启动服务。
+
+浏览器打开 `http://localhost:8501` 即可使用。
+
+---
+
+### 手动启动（备选）
 
 ```powershell
-# Windows（必须用 py -m，不能用 bash 的 streamlit 命令）
+# 首次：安装依赖
+py -m pip install -r requirements.txt
+
+# 启动
 py -m streamlit run app.py --server.headless true --server.port 8501
 
-# 重启前务必清除 Python 字节码缓存
-taskkill /F /IM streamlit.exe 2>$null; taskkill /F /IM python.exe 2>$null
+# 重启前清除缓存（修改代码后必须执行）
+taskkill /F /IM python.exe 2>$null
 Remove-Item -Recurse -Force __pycache__ -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force agents\__pycache__ -ErrorAction SilentlyContinue
 ```
+
+### 常见问题
+
+| 问题 | 解决方法 |
+|------|---------|
+| `py` 命令找不到 | Python 未安装或未勾选 "Add to PATH"，重装并勾选 |
+| 端口 8501 被占用 | 改端口：`--server.port 8502` |
+| 修改代码后不生效 | 必须先删 `__pycache__` 文件夹再重启 |
+| LLM 连接失败 | 检查 `.env` 中 API Key 是否正确，检查网络能否访问 api.deepseek.com |
+| 测试模式 | 侧边栏开启 `🧪 测试模式`，不消耗 API 费用，秒级生成假数据 |
 
 ---
 
